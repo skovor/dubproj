@@ -203,12 +203,12 @@ def _raw_char_segments(value: Mapping[str, Any], words: list[dict[str, Any]]) ->
 
 def _character_evidence(text: str, value: Mapping[str, Any], words: list[dict[str, Any]]) -> dict[str, Any]:
     """Normalize WhisperX/MFA character output into diagnostic-only metrics."""
-    expected = [char for char in str(text or "") if not char.isspace()]
+    expected = [char for char in str(text or "") if not char.isspace() and (char.isalnum() or char in "'’")]
     raw_rows = _raw_char_segments(value, words)
     rows: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_rows):
         char = str(raw.get("char", raw.get("text", raw.get("label", ""))) or "")
-        if not char or char.isspace():
+        if not char or char.isspace() or not any(item.isalnum() for item in char):
             continue
         start = raw.get("start")
         end = raw.get("end")
