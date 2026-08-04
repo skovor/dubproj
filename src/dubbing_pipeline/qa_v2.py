@@ -816,6 +816,11 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         failure = FailureClass.ASR_UNCERTAIN
     elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"}:
         failure = FailureClass.STOCHASTIC_TTS
+    elif lexical_decision is not None and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and "source_language" in failures:
+        # A calibrated content result without the independent target-language
+        # evidence required to clear the source gate is still uncertain; do
+        # not misclassify that policy hold as a TTS retry.
+        failure = FailureClass.ASR_UNCERTAIN
     else:
         failure = _failure_for(failures[0]) if failures else None
     return QAResultV2(passed, gates, diagnostics, failure)

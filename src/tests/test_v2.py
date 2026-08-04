@@ -368,6 +368,30 @@ class V2QATests(unittest.TestCase):
                 self.assertEqual(decision.status, "BLOCKED", name)
                 self.assertEqual(decision.calibration_profile_status, expected, name)
 
+    def test_calibrated_content_without_target_lid_is_held_not_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self._wav(directory)
+            profile, runtime_lock, models_lock = _validated_profile(root)
+            evidence = {
+                "target_language": "de",
+                "evidence_records": [{"evidence_family": "WHISPER_ASR"}],
+                "forced_target": {"text": "Keine Sorge", "language": "de", "probability": .99},
+                "automatic": {"text": "Don't worry", "language": "en", "probability": .99},
+            }
+            chars = [{"char": char, "start": index * .02, "end": (index + 1) * .02, "score": .9} for index, char in enumerate(char for char in "Keine Sorge" if not char.isspace())]
+            result = evaluate_candidate_v2(
+                str(path), expected_text="Keine Sorge", source_text="Don't worry", target_sample_rate=24000, target_frames=2400,
+                linguistic_evidence=evidence,
+                alignment_evidence={"target_score": .95, "source_score": .10, "target": {"char_segments": chars}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+                calibration_authority=True, calibration_profile=profile, calibration_profile_root=root,
+                backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+                runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
+            )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.gates["source_language"].status, GateStatus.FAIL)
+            self.assertEqual(result.failure_class.value, "ASR_UNCERTAIN")
+
     def test_alignment_score_without_whisper_family_cannot_hard_confirm(self):
         base = decide_linguistic_evidence(
             "Hallo", "Hello", forced_target={"text": "Hallo", "language": "de", "probability": .99},
