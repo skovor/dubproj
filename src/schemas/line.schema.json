@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "generic-dubbing-line",
+  "type": "object",
+  "required": ["id", "source_text", "target_text", "start", "end", "subtitle_authorized"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "speaker": {"type": "string"},
+    "source_text": {"type": "string"},
+    "target_text": {"type": "string"},
+    "start": {"type": "number", "minimum": 0},
+    "end": {"type": "number", "minimum": 0},
+    "subtitle_authorized": {"type": "boolean"},
+    "movie_identity_verified": {"type": "boolean"},
+    "card_identity_verified": {"type": "boolean"},
+    "card_timebase_verified": {"type": "boolean"},
+    "force_keep_original": {"type": "boolean"},
+    "preserve_reason": {"type": ["string", "null"]},
+    "reference_audio": {"type": ["string", "null"]},
+    "reference_segments": {"type": "array"},
+    "preserved_source_intervals": {"type": "array"},
+    "source_resume": {"type": ["number", "null"]}
+  }
+}

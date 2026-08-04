@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+cache/
+artifacts/
+review_bundle*.json
+*.wav
+*.usm
+*.adx
+*.hca
+.env

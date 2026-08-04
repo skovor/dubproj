@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "generic-dubbing-scene-manifest",
+  "type": "object",
+  "required": ["id", "topology", "lines"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "topology": {"enum": ["LINE_SEPARATED", "IN_ENGINE_TIMELINE", "EMBEDDED_FMV"]},
+    "source_stem": {"type": ["string", "null"]},
+    "dialogue_channel": {"type": "integer", "minimum": 0},
+    "movie_identity_verified": {"type": "boolean"},
+    "lines": {"type": "array", "items": {"$ref": "line.schema.json"}}
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "schema": "generic-dubbing-port-manifest-v1",
+  "purpose": "Portable generic source plus production provenance for GPT review",
+  "source_policy": "No audio, maps, model weights, credentials, or KIRO files are included",
+  "generic_runtime": {
+    "package": "dubbing_pipeline",
+    "entrypoint": "scripts/run_pipeline.py",
+    "topologies": ["LINE_SEPARATED", "IN_ENGINE_TIMELINE", "EMBEDDED_FMV"]
+  },
+  "ported_modules": {
+    "generation_and_montage": [
+      "produce_anime_scene.py",
+      "produce_in_engine_bank.py",
+      "run_global_fmv_rounds.py",
+      "revalidate_anime_candidates.py",
+      "audio_contracts.py",
+      "prod_timing.py",
+      "gen_scream_comparison.py",
+      "score_screams_acoustic.py",
+      "splice_interjection.py",
+      "clean_runtime.py",
+      "line_policy.py",
+      "anime_contract.py"
+    ],
+    "mapping_and_timebase": [
+      "build_visual_card_authority.py",
+      "derive_episode_visible_card_windows.py",
+      "align_anime_to_reference_video.py",
+      "visual_align_usm_to_longplay.py",
+      "extract_subtitle_cards_from_longplay.py",
+      "prepare_visual_anime_generation_maps.py",
+      "finalize_anime_delivery_maps.py",
+      "audit_subtitle_scene_alignment_codex2.py",
+      "audit_anime_source_boundaries.py"
+    ],
+    "qa_and_language": [
+      "audit_final_scene_language.py",
+      "audit_anime_release_gates.py",
+      "audit_anime_card_tail_windows.py",
+      "audit_exact_generation_technical.py",
+      "audit_exact_reference_alignment.py",
+      "validate_anime_delivery_maps.py",
+      "qa_anime_pipeline.py",
+      "qa_full_game.py",
+      "rebuild_anime_delivery_windows_mms.py",
+      "rebuild_anime_scene_blocks_mms.py",
+      "rebuild_anime_card_seeded_rescue.py",
+      "rebuild_anime_asr_seeded_mms.py",
+      "transcribe_anime_large_v3_gpu.py",
+      "transcribe_anime_dual_gpu.py"
+    ],
+    "line_and_bank_runtime": [
+      "prod_dub.py",
+      "final_policy_runtime.py",
+      "classify_screams.py"
+    ],
+    "containers_and_deploy": [
+      "rebuild_anime_usm.py",
+      "package_fmv_adapter_example.py",
+      "deploy_anime_usm.py",
+      "deploy_exact_generation_to_ryo.py",
+      "deploy_shared_full_to_ryo.py",
+      "empaqueta_mod.py",
+      "acb_cue_resolver.py",
+      "awb_index.py",
+      "awb_index_btlevent.py",
+      "cri_utf.py",
+      "copy_acb_awb_pairs.py",
+      "inspect_acb_utf.py",
+      "inventory_all_acb_cues.py"
+    ],
+    "regressions": [
+      "test_anime_codex2_regressions.py",
+      "test_efficiency_policy.py",
+      "test_generation_policy.py",
+      "test_line_policy_regressions.py",
+      "test_process_qa_worker.py"
+    ]
+  },
+  "not_ported": {
+    "reason": "one-off P3R inventories, HTML review generators, experiment scripts, generated artifacts, and data are project evidence rather than reusable runtime code",
+    "location": "the original project pipeline, never copied into this src"
+  }
+}

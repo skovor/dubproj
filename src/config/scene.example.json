@@ -1,0 +1,27 @@
+{
+  "id": "example_scene",
+  "topology": "LINE_SEPARATED",
+  "lines": [
+    {
+      "id": "example_scene_L001",
+      "speaker": "Example Speaker",
+      "source_text": "Hello, are you there?",
+      "target_text": "Hallo, bist du da?",
+      "start": 0.0,
+      "end": 2.1,
+      "subtitle_authorized": true,
+      "reference_audio": "../references/example_scene_L001_EN.wav"
+    },
+    {
+      "id": "example_scene_L002",
+      "speaker": "Example Speaker",
+      "source_text": "Palladion!",
+      "target_text": "Palladion!",
+      "start": 2.1,
+      "end": 2.8,
+      "subtitle_authorized": true,
+      "force_keep_original": true,
+      "preserve_reason": "isolated_name_call"
+    }
+  ]
+}

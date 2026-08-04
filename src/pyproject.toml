@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "generic-dubbing-pipeline"
+version = "0.1.0"
+description = "Config-driven VN/in-engine and embedded-FMV dubbing pipeline"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+audio = ["numpy>=1.24", "soundfile>=0.12", "librosa>=0.10"]
+qa = ["faster-whisper>=1.0", "pyloudnorm>=0.1"]
+omnivoice = ["torch", "torchaudio"]
+cri = ["wannacri"]
+all = ["numpy>=1.24", "soundfile>=0.12", "librosa>=0.10", "faster-whisper>=1.0", "pyloudnorm>=0.1", "torch", "torchaudio"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dubbing_pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,25 @@
+name: generic-dubbing-source-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile source
+        run: python -m compileall -q .
+      - name: Dependency-light smoke tests
+        run: python tests/run_smoke.py
+      - name: Port and project-independence check
+        run: python scripts/check_port.py
+      - name: Validate example manifest
+        run: python scripts/run_pipeline.py validate --config config/project.example.json --manifest config/scene.example.json
