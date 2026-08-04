@@ -54,7 +54,7 @@ LinguisticStatus = Literal[
     "ALIGNMENT_UNCERTAIN",
     "LANGUAGE_LEAK_CONFIRMED",
     "LANGUAGE_LEAK_SUSPECTED",
-    "LEXICAL_FAILURE_CONFIRMED",
+    "LEXICAL_FAILURE_SUSPECTED",
     "ALIGNER_NOT_APPLICABLE",
     "PERFORMANCE_UNCERTAIN",
     "HUMAN_REVIEW",
@@ -70,6 +70,7 @@ class LinguisticDecision:
     expected_alignment_score: float | None = None
     source_alignment_score: float | None = None
     alignment_margin: float | None = None
+    cross_language_margin: float | None = None
     forced_transcript: str | None = None
     automatic_transcript: str | None = None
     detected_language: str | None = None
@@ -95,6 +96,7 @@ class LinguisticDecision:
             "expected_alignment_score": self.expected_alignment_score,
             "source_alignment_score": self.source_alignment_score,
             "alignment_margin": self.alignment_margin,
+            "cross_language_margin": self.cross_language_margin,
             "forced_transcript": self.forced_transcript,
             "automatic_transcript": self.automatic_transcript,
             "detected_language": self.detected_language,
@@ -259,10 +261,10 @@ def apply_independent_evidence(
 ) -> LinguisticDecision:
     """Promote a screen only after a genuinely different evidence family.
 
-    Two Whisper modes remain one ``WHISPER_ASR`` family.  A hard linguistic
-    confirmation therefore requires CTC/Kaldi alignment, and a confirmed
-    source-language leak additionally requires independent LID or a clearly
-    superior source-text alignment.
+    Two Whisper modes remain one ``WHISPER_ASR`` family.  Cross-language CTC
+    margins are retained as diagnostics only; they are never a hard gate.
+    A source-language leak additionally requires automatic Whisper to favour
+    the source language, independent LID, and a weak target-only CTC result.
     """
     if not alignment_evidence:
         return LinguisticDecision(
@@ -289,7 +291,7 @@ def apply_independent_evidence(
         if mismatched:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "ALIGNMENT_UNCERTAIN", "expected_alignment_score": target_score,
-                   "source_alignment_score": source_score, "alignment_margin": margin,
+                   "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
                    "evidence_records": records, "evidence_families": families,
                    "reason": "independent evidence belongs to a different audio artifact"}
             )
@@ -301,7 +303,7 @@ def apply_independent_evidence(
     if not independent_alignment or len(families) < 2:
         return LinguisticDecision(
             **{**base.__dict__, "status": "ALIGNMENT_UNCERTAIN", "expected_alignment_score": target_score,
-               "source_alignment_score": source_score, "alignment_margin": margin,
+               "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
                "evidence_records": records, "evidence_families": families,
                "reason": "at least two independent evidence families are required for a hard linguistic verdict"}
         )
@@ -309,31 +311,45 @@ def apply_independent_evidence(
     lid_language = _language_code((lid_evidence or {}).get("language", ""))
     source_code = _language_code(source_language)
     lid_probability = float((lid_evidence or {}).get("probability", 0.0) or 0.0)
-    independent_source_lid = bool(lid_evidence and lid_language == source_code and lid_probability >= .70)
-    source_alignment_wins = source_score is not None and source_score >= source_leak_score and (margin is None or margin <= -min_margin)
-    target_alignment_wins = target_score >= min_target_score and (margin is None or margin >= min_margin)
+    lid_record = (lid_evidence or {}).get("record") or {}
+    lid_family = str(lid_record.get("evidence_family", ""))
+    independent_source_lid = bool(
+        lid_evidence
+        and lid_family == "AUDIO_LANGUAGE_ID"
+        and lid_language == source_code
+        and lid_probability >= .70
+    )
+    # The raw source score and target-source margin are diagnostic telemetry.
+    # German and English CTC models are not calibrated onto one probability
+    # scale, so neither may decide a hard verdict.
+    whisper_source = (
+        _language_code(base.detected_language) == source_code
+        and float(base.language_probability or 0.0) >= .70
+    ) or base.status == "LANGUAGE_LEAK_SUSPECTED"
+    target_alignment_wins = target_score >= min_target_score
+    target_alignment_weak = target_score < min_target_score
 
-    if source_alignment_wins and independent_source_lid:
+    if whisper_source and target_alignment_weak and independent_source_lid:
         status: LinguisticStatus = "LANGUAGE_LEAK_CONFIRMED"
-        reason = "CTC alignment favors source text and independent spoken-language ID agrees"
-    elif source_alignment_wins:
+        reason = "Whisper and independent LID favor source language while target CTC is weak"
+    elif whisper_source and target_alignment_weak:
         status = "LANGUAGE_LEAK_SUSPECTED"
-        reason = "CTC alignment favors source text; independent LID is absent or inconclusive"
+        reason = "Whisper favors source language and target CTC is weak; independent LID is absent or inconclusive"
     elif target_alignment_wins:
         status = "PASS_CONFIRMED" if base.status == "PASS_SCREENED" else "PASS_PHONETIC"
-        reason = "independent CTC/Kaldi alignment confirms target phonetic content"
-    elif target_score < (min_target_score - .15) and (source_score is None or source_score < source_leak_score):
-        status = "LEXICAL_FAILURE_CONFIRMED"
-        reason = "independent alignment rejects target content without confirming source language"
+        reason = "target-only CTC/Kaldi alignment supports target phonetic content; cross-language margin is diagnostic"
+    elif target_score < (min_target_score - .15):
+        status = "LEXICAL_FAILURE_SUSPECTED"
+        reason = "target-only alignment is weak; calibration is required before a lexical failure is confirmed"
     else:
         status = "ALIGNMENT_UNCERTAIN"
         reason = "contrastive target/source alignment margin is inconclusive"
     return LinguisticDecision(
         **{**base.__dict__, "status": status, "expected_alignment_score": target_score,
-           "source_alignment_score": source_score, "alignment_margin": margin,
+           "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
            "final_anchor_present": bool(final_anchor) if final_anchor is not None else base.final_anchor_present,
            "evidence_records": records, "evidence_families": families,
-           "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
+           "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED"},
            "reason": reason}
     )
 
@@ -452,7 +468,6 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         gates["final_word"] = _gate("final_word", GateStatus.PASS if (forced_final_ok or alignment_confirms_final) else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_final}, evidence_hash=evidence_hash)
         alignment_overrides_whisper_leak = bool(
             alignment_confirms_content
-            and (lexical_decision.source_alignment_score is None or lexical_decision.source_alignment_score < alignment_source_leak_score)
         )
         gates["source_language"] = _gate(
             "source_language",
@@ -500,7 +515,7 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         passed = False
     if lexical_decision is not None and lexical_decision.status in {"ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "ALIGNER_NOT_APPLICABLE", "HUMAN_REVIEW"}:
         failure = FailureClass.ASR_UNCERTAIN
-    elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"}:
+    elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_SUSPECTED"}:
         failure = FailureClass.STOCHASTIC_TTS
     else:
         failure = _failure_for(failures[0]) if failures else None

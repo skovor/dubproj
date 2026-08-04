@@ -30,6 +30,10 @@ hash-only baseline in the external sandbox.
   does not perform a third Whisper transcription. If the second family is
   unavailable or inconclusive, the candidate is held rather than passed or
   regenerated.
+- Raw target-versus-source CTC margins are now diagnostic telemetry only;
+  they cannot confirm a German pass or an English leak because separate
+  language models are not calibrated onto one score scale. English leakage
+  requires source-favoring Whisper plus independent LID and weak target CTC.
 - `post_qa.py` makes the delivery boundary explicit: every raw candidate is
   re-audited after processing, after surgical mounting, and after reopening
   the serialized artifact. FMV scenes receive a final full-scene audit that

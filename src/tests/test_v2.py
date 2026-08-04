@@ -186,6 +186,7 @@ class V2QATests(unittest.TestCase):
             self.assertTrue(result.passed)
             self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "PASS_PHONETIC")
             self.assertEqual(result.diagnostics["linguistic_decision"]["evidence_families"], ["CTC_FORCED_ALIGNER", "WHISPER_ASR"])
+            self.assertEqual(result.diagnostics["linguistic_decision"]["cross_language_margin"], .80)
 
     def test_ctc_target_can_overrule_whisper_language_misread(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -208,6 +209,18 @@ class V2QATests(unittest.TestCase):
             self.assertTrue(result.passed)
             self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "PASS_PHONETIC")
             self.assertEqual(result.gates["source_language"].status, GateStatus.PASS)
+
+    def test_cross_language_ctc_margin_is_diagnostic_only(self):
+        base = decide_linguistic_evidence(
+            "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+            automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(), evidence_hashes=["a" * 64],
+        )
+        result = apply_independent_evidence(
+            base,
+            {"target_score": .90, "source_score": .90, "margin": 0.0, "target": {"score": .90, "final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+        )
+        self.assertEqual(result.status, "PASS_CONFIRMED")
+        self.assertEqual(result.cross_language_margin, 0.0)
 
     def test_alignment_score_without_whisper_family_cannot_hard_confirm(self):
         base = decide_linguistic_evidence(
@@ -258,7 +271,7 @@ class V2QATests(unittest.TestCase):
     def test_ctc_source_preference_needs_independent_lid_for_confirmed_leak(self):
         base = decide_linguistic_evidence(
             "Keine Sorge", "Don't worry", forced_target={"text": "Dann wurde", "language": "de", "probability": .99},
-            automatic={"text": "Dann wurde", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(), evidence_hashes=["a" * 64],
+            automatic={"text": "Don't worry", "language": "en", "probability": .99}, target_language="de", profile=LanguageProfile(), evidence_hashes=["a" * 64],
         )
         alignment = {"target_score": .20, "source_score": .90, "margin": -.70, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]}
         suspected = apply_independent_evidence(base, alignment, source_language="en")
@@ -276,7 +289,7 @@ class V2QATests(unittest.TestCase):
             {"target_score": .20, "source_score": .10, "margin": .10, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
             source_language="en",
         )
-        self.assertEqual(result.status, "LEXICAL_FAILURE_CONFIRMED")
+        self.assertEqual(result.status, "LEXICAL_FAILURE_SUSPECTED")
 
     def test_missing_alignment_family_is_a_hold(self):
         base = decide_linguistic_evidence(

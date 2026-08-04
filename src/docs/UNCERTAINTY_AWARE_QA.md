@@ -38,10 +38,10 @@ records whose artifact SHA does not match the Whisper artifact are rejected as
 | `PASS_CONFIRMED` | A second family confirms a screened candidate. | No. |
 | `PASS_PHONETIC` | A second family confirms target phonetic content after Whisper disagreement. | No. |
 | `ASR_UNCERTAIN` | Whisper evidence disagrees or is insufficient. | No; selective alignment/hold. |
-| `ALIGNMENT_UNCERTAIN` | Target/source alignment margin is inconclusive. | No; hold. |
+| `ALIGNMENT_UNCERTAIN` | Target-only alignment is unavailable or not calibrated. | No; hold. |
 | `LANGUAGE_LEAK_SUSPECTED` | Whisper or CTC suggests source speech without independent confirmation. | No; hold/escalate. |
-| `LANGUAGE_LEAK_CONFIRMED` | CTC favors source text and independent LID agrees. | No; diagnose/regenerate explicitly. |
-| `LEXICAL_FAILURE_CONFIRMED` | Independent alignment rejects target without proving source language. | No; diagnose/regenerate explicitly. |
+| `LANGUAGE_LEAK_CONFIRMED` | Whisper and independent LID favor source language while target-only CTC is weak. | No; diagnose/regenerate explicitly. |
+| `LEXICAL_FAILURE_SUSPECTED` | Target-only alignment is weak; calibration is still required. | No; hold/calibrate. |
 | `ALIGNER_NOT_APPLICABLE` | No configured independent aligner. | No; never silently pass. |
 | `HUMAN_REVIEW` | Automated evidence cannot decide. | No; explicit review. |
 
@@ -60,10 +60,13 @@ The cost-controlled order is:
    LID; reserve MFA for persistent difficult cases.
 
 The CTC adapter aligns the known German subtitle and the original English
-subtitle contrastively.  It never asks WhisperX to transcribe again.  A strong
-German score and positive margin can produce `PASS_CONFIRMED` or
-`PASS_PHONETIC`; a strong English score without independent LID remains
-`LANGUAGE_LEAK_SUSPECTED`; a narrow margin produces `ALIGNMENT_UNCERTAIN`.
+subtitle for diagnostics, but it never compares raw cross-language scores as a
+hard gate: German and English alignment models are not calibrated onto one
+probability scale. A target-only score may support `PASS_CONFIRMED` or
+`PASS_PHONETIC` provisionally; thresholds remain a later calibration task. A
+source-language confirmation requires Whisper and independent LID to favor the
+source while target-only CTC is weak. A raw cross-language margin is preserved
+as `cross_language_margin` telemetry only.
 
 The line report is candidate-aware (`candidate_linguistic_decisions`,
 `line_linguistic_summary`, and `selected_candidate_linguistic_decision`).  An
