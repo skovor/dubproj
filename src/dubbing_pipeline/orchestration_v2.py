@@ -104,9 +104,16 @@ def _profile(config: Any, supplied: LanguageProfile | None) -> LanguageProfile:
 
 def _calibration_kwargs(config: Any, alignment_backend: Any) -> dict[str, Any]:
     """Bind QA authority to the exact active alignment runtime identity."""
+    runtime_lock = getattr(config, "runtime_lock", None)
+    models_lock = getattr(config, "models_lock", None)
     return {
         "calibration_authority": bool(getattr(config.qa, "calibration_authority", False)),
         "calibration_profile": getattr(config.qa, "calibration_profile", None),
+        "calibration_profile_root": getattr(config.qa, "calibration_profile_root", None),
+        "feature_schema_version": "char-alignment-v1",
+        "backend_id": str(getattr(alignment_backend, "backend_id", "unknown")) if alignment_backend is not None else None,
+        "runtime_lock_sha256": sha256_file(runtime_lock) if runtime_lock is not None and Path(runtime_lock).is_file() else None,
+        "models_lock_sha256": sha256_file(models_lock) if models_lock is not None and Path(models_lock).is_file() else None,
         "model_id": str(getattr(alignment_backend, "model_id", "unknown")) if alignment_backend is not None else None,
         "model_revision": str(getattr(alignment_backend, "model_revision", "unknown")) if alignment_backend is not None else None,
         "performance_mode": str(getattr(config.qa, "performance_mode", "NEUTRAL")),

@@ -4,13 +4,16 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from .audio import clipping, peak_dbfs, read
 from .contracts import FailureClass, GateEvidence, GateStatus, gate_passes
+from .hashing import sha256_file
 from .timing import speech_end
 
 _TOKEN = re.compile(r"[^\W\d_]+", re.UNICODE)
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def fold(text: str) -> str:
@@ -85,6 +88,15 @@ class LinguisticDecision:
     word_coverage: float | None = None
     phone_coverage: float | None = None
     final_anchor_present: bool | None = None
+    final_anchor_evidence: dict[str, Any] | None = None
+    char_segments: list[dict[str, Any]] = field(default_factory=list)
+    native_char_coverage: float | None = None
+    mean_char_score: float | None = None
+    minimum_char_score: float | None = None
+    p10_char_score: float | None = None
+    unaligned_characters: list[str] = field(default_factory=list)
+    interpolated_characters: list[str] = field(default_factory=list)
+    compression_ratio: float | None = None
     missing_tokens: list[str] = field(default_factory=list)
     expected_tokens: list[str] = field(default_factory=list)
     forced_final_tokens: list[str] = field(default_factory=list)
@@ -113,6 +125,15 @@ class LinguisticDecision:
             "word_coverage": self.word_coverage,
             "phone_coverage": self.phone_coverage,
             "final_anchor_present": self.final_anchor_present,
+            "final_anchor_evidence": dict(self.final_anchor_evidence) if self.final_anchor_evidence is not None else None,
+            "char_segments": [dict(item) for item in self.char_segments],
+            "native_char_coverage": self.native_char_coverage,
+            "mean_char_score": self.mean_char_score,
+            "minimum_char_score": self.minimum_char_score,
+            "p10_char_score": self.p10_char_score,
+            "unaligned_characters": list(self.unaligned_characters),
+            "interpolated_characters": list(self.interpolated_characters),
+            "compression_ratio": self.compression_ratio,
             "missing_tokens": list(self.missing_tokens),
             "expected_tokens": list(self.expected_tokens),
             "forced_final_tokens": list(self.forced_final_tokens),
@@ -265,63 +286,132 @@ def calibration_profile_status(
     authority: bool,
     model_id: str | None,
     model_revision: str | None,
+    backend_id: str | None = None,
     target_language: str,
     source_language: str,
     performance_mode: str | None = None,
+    feature_schema_version: str = "char-alignment-v1",
+    calibrator_root: str | Path | None = None,
+    runtime_lock_sha256: str | None = None,
+    models_lock_sha256: str | None = None,
 ) -> str:
-    """Return the authority state for an acoustic calibration profile.
-
-    A CTC score is not a probability merely because it is numeric.  The
-    profile therefore has to opt in explicitly and bind the score to the
-    exact aligner model/revision, language pair, and (when declared) vocal
-    performance mode.  ``BLOCKED`` is deliberately returned for a requested
-    authority with a missing or mismatched profile instead of silently
-    falling back to an uncalibrated threshold.
-    """
+    """Validate the complete artifact that is allowed to grant QA authority."""
     if not authority:
         return "DISABLED"
     if not isinstance(profile, Mapping):
-        return "BLOCKED_MISSING_PROFILE"
-    schema = str(profile.get("schema", ""))
-    if schema not in {
-        "generic-dubbing-calibration-profile-v1",
-        "generic-dubbing-alignment-calibration-v1",
-        "generic-dubbing-calibration-v1",
-    }:
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    if str(profile.get("schema", "")) != "generic-dubbing-alignment-calibration-profile-v1":
         return "BLOCKED_SCHEMA"
+    if str(profile.get("status", "")) != "VALIDATED":
+        return "BLOCKED_PROFILE_STATUS"
     if profile.get("authority", profile.get("calibration_authority")) is not True:
         return "BLOCKED_PROFILE_NOT_AUTHORIZED"
-    identity = profile.get("identity") if isinstance(profile.get("identity"), Mapping) else profile
-    model = identity.get("model") if isinstance(identity.get("model"), Mapping) else identity
-    languages = identity.get("languages") or identity.get("language_pair")
-    if not isinstance(languages, Mapping):
-        languages = identity
-    expected = {
-        "model_id": model_id if model_id is not None else model.get("id"),
-        "model_revision": model_revision if model_revision is not None else model.get("revision"),
-        "target_language": target_language if target_language is not None else languages.get("target"),
-        "source_language": source_language if source_language is not None else languages.get("source"),
+    if not str(profile.get("profile_id", "")).strip():
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    identity = profile.get("identity")
+    thresholds = profile.get("thresholds")
+    calibrator = profile.get("calibrator")
+    dataset = profile.get("dataset")
+    metrics = profile.get("metrics")
+    provenance = profile.get("provenance")
+    if not all(isinstance(item, Mapping) for item in (identity, thresholds, calibrator, dataset, metrics, provenance)):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    required_identity = {"backend_id", "model_id", "model_revision", "feature_schema_version", "target_language", "source_language", "performance_modes"}
+    if not required_identity.issubset(identity) or not isinstance(identity.get("performance_modes"), (list, tuple, set)) or not identity.get("performance_modes"):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    expected_identity = {
+        "backend_id": backend_id,
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "feature_schema_version": feature_schema_version,
+        "target_language": target_language,
+        "source_language": source_language,
     }
-    for key, value in expected.items():
-        profile_value = model.get(key) if key in {"model_id", "model_revision"} else languages.get(key)
-        if key == "model_id":
-            profile_value = model.get("id", model.get("model_id", identity.get("model_id", "")))
-        elif key == "model_revision":
-            profile_value = model.get("revision", model.get("model_revision", identity.get("model_revision", "")))
-        elif key == "target_language":
-            profile_value = languages.get("target_language", languages.get("target", identity.get("target_language", "")))
-        elif key == "source_language":
-            profile_value = languages.get("source_language", languages.get("source", identity.get("source_language", "")))
-        if value in (None, "") or str(profile_value) != str(value):
-            return "BLOCKED_IDENTITY_MISMATCH"
-    declared_mode = identity.get("performance_mode")
-    declared_modes = identity.get("performance_modes")
-    if declared_mode is not None and str(declared_mode) != str(performance_mode or ""):
+    for key, value in expected_identity.items():
+        if value in (None, "") or str(identity.get(key, "")) != str(value):
+            return "BLOCKED_IDENTITY_MISMATCH" if key != "feature_schema_version" else "BLOCKED_FEATURE_SCHEMA"
+    if str(performance_mode or "") not in {str(item) for item in identity["performance_modes"]}:
         return "BLOCKED_MODE_MISMATCH"
-    if declared_modes is not None:
-        if not isinstance(declared_modes, (list, tuple, set)) or str(performance_mode or "") not in {str(item) for item in declared_modes}:
-            return "BLOCKED_MODE_MISMATCH"
-    return "MATCHED"
+    threshold_keys = {"target_pass_probability", "target_failure_probability", "final_anchor_pass_probability", "source_lid_probability"}
+    if not threshold_keys.issubset(thresholds):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    try:
+        threshold_values = {key: float(thresholds[key]) for key in threshold_keys}
+    except (TypeError, ValueError):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    if any(value < 0.0 or value > 1.0 for value in threshold_values.values()) or threshold_values["target_failure_probability"] >= threshold_values["target_pass_probability"]:
+        return "BLOCKED_INVALID_THRESHOLDS"
+    if not all(str(calibrator.get(key, "")).strip() for key in ("type", "artifact_path", "artifact_sha256")) or not _SHA256.fullmatch(str(calibrator.get("artifact_sha256", ""))):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    artifact_path = Path(str(calibrator["artifact_path"]))
+    if not artifact_path.is_absolute():
+        root_value = calibrator_root or profile.get("profile_root")
+        if root_value in (None, ""):
+            return "BLOCKED_CALIBRATOR_ARTIFACT"
+        artifact_path = Path(root_value) / artifact_path
+    if not artifact_path.is_file():
+        return "BLOCKED_CALIBRATOR_ARTIFACT"
+    try:
+        if sha256_file(artifact_path).casefold() != str(calibrator["artifact_sha256"]).casefold():
+            return "BLOCKED_CALIBRATOR_HASH"
+    except OSError:
+        return "BLOCKED_CALIBRATOR_ARTIFACT"
+    dataset_hashes = {"manifest_sha256", "labels_sha256", "split_manifest_sha256"}
+    if not dataset_hashes.issubset(dataset) or any(not _SHA256.fullmatch(str(dataset.get(key, ""))) for key in dataset_hashes):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    for key in ("calibration_count", "validation_count", "hidden_test_count"):
+        if not isinstance(dataset.get(key), int) or dataset[key] <= 0:
+            return "BLOCKED_INCOMPLETE_PROFILE"
+    metric_keys = {"hidden_false_pass_count", "hidden_false_fail_count", "brier_score", "expected_calibration_error"}
+    if not metric_keys.issubset(metrics):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    try:
+        if any(float(metrics[key]) < 0.0 for key in ("hidden_false_pass_count", "hidden_false_fail_count", "brier_score", "expected_calibration_error")):
+            return "BLOCKED_INCOMPLETE_PROFILE"
+    except (TypeError, ValueError):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    provenance_keys = {"code_commit", "runtime_lock_sha256", "models_lock_sha256", "created_at"}
+    if not provenance_keys.issubset(provenance) or not all(str(provenance.get(key, "")).strip() for key in provenance_keys):
+        return "BLOCKED_INCOMPLETE_PROFILE"
+    for key in ("runtime_lock_sha256", "models_lock_sha256"):
+        if not _SHA256.fullmatch(str(provenance.get(key, ""))):
+            return "BLOCKED_INCOMPLETE_PROFILE"
+    if runtime_lock_sha256 is None or models_lock_sha256 is None:
+        return "BLOCKED_RUNTIME_LOCK_UNAVAILABLE"
+    if str(provenance["runtime_lock_sha256"]).casefold() != str(runtime_lock_sha256).casefold() or str(provenance["models_lock_sha256"]).casefold() != str(models_lock_sha256).casefold():
+        return "BLOCKED_RUNTIME_MODEL_MISMATCH"
+    return "MATCHED_VALIDATED"
+
+
+def _validated_profile_threshold(profile: Mapping[str, Any] | None, key: str, default: float) -> float:
+    try:
+        return float((profile or {}).get("thresholds", {}).get(key, default))
+    except (TypeError, ValueError, AttributeError):
+        return float(default)
+
+
+def _final_anchor_is_calibrated(
+    decision: LinguisticDecision,
+    *,
+    profile: Mapping[str, Any] | None,
+    feature_schema_version: str,
+) -> bool:
+    """Require the commit-3 final-anchor evidence for calibrated authority."""
+    evidence = decision.final_anchor_evidence
+    if feature_schema_version == "char-alignment-v1":
+        # The legacy boolean remains a compatibility bridge only until the
+        # character-evidence adapter lands. Commit 3 removes this fallback.
+        if not isinstance(evidence, Mapping):
+            return decision.final_anchor_present is True
+        if bool(evidence.get("interpolated")):
+            return False
+        minimum = evidence.get("minimum_score")
+        threshold = _validated_profile_threshold(profile, "final_anchor_pass_probability", 1.0)
+        try:
+            return minimum is not None and float(minimum) >= threshold
+        except (TypeError, ValueError):
+            return False
+    return decision.final_anchor_present is True
 
 
 def apply_independent_evidence(
@@ -336,6 +426,11 @@ def apply_independent_evidence(
     source_language: str = "en",
     calibration_authority: bool = False,
     calibration_profile: Mapping[str, Any] | None = None,
+    calibration_profile_root: str | Path | None = None,
+    feature_schema_version: str = "char-alignment-v1",
+    backend_id: str | None = None,
+    runtime_lock_sha256: str | None = None,
+    models_lock_sha256: str | None = None,
     model_id: str | None = None,
     model_revision: str | None = None,
     performance_mode: str | None = None,
@@ -352,11 +447,16 @@ def apply_independent_evidence(
         authority=bool(calibration_authority),
         model_id=model_id,
         model_revision=model_revision,
+        backend_id=backend_id,
         target_language=target_language,
         source_language=source_language,
         performance_mode=performance_mode,
+        feature_schema_version=feature_schema_version,
+        calibrator_root=calibration_profile_root,
+        runtime_lock_sha256=runtime_lock_sha256,
+        models_lock_sha256=models_lock_sha256,
     )
-    calibrated = profile_status == "MATCHED"
+    calibrated = profile_status == "MATCHED_VALIDATED"
     if calibration_authority and not calibrated and not alignment_evidence:
         return LinguisticDecision(
             **{**base.__dict__, "status": "BLOCKED", "confirmed": False,
@@ -378,6 +478,11 @@ def apply_independent_evidence(
     margin = float(margin_value) if margin_value is not None else (target_score - source_score if source_score is not None else None)
     alignment_target = alignment_evidence.get("target") or {}
     final_anchor = alignment_target.get("final_anchor_present", base.final_anchor_present)
+    final_anchor_evidence = alignment_target.get("final_anchor_evidence")
+    if isinstance(final_anchor_evidence, Mapping):
+        final_anchor_evidence = dict(final_anchor_evidence)
+    else:
+        final_anchor_evidence = None
     records = list(base.evidence_records)
     records.extend(list(alignment_evidence.get("evidence_records") or []))
     if lid_evidence:
@@ -429,7 +534,7 @@ def apply_independent_evidence(
         lid_evidence
         and lid_family == "AUDIO_LANGUAGE_ID"
         and lid_language == source_code
-        and lid_probability >= .70
+        and lid_probability >= _validated_profile_threshold(calibration_profile if calibrated else None, "source_lid_probability", .70)
     )
     # The raw source score and target-source margin are diagnostic telemetry.
     # German and English CTC models are not calibrated onto one probability
@@ -438,8 +543,10 @@ def apply_independent_evidence(
         _language_code(base.detected_language) == source_code
         and float(base.language_probability or 0.0) >= .70
     ) or base.status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION"}
-    target_alignment_wins = target_score >= min_target_score
-    target_alignment_weak = target_score < min_target_score
+    target_pass_threshold = _validated_profile_threshold(calibration_profile if calibrated else None, "target_pass_probability", min_target_score)
+    target_failure_threshold = _validated_profile_threshold(calibration_profile if calibrated else None, "target_failure_probability", min_target_score - .15)
+    target_alignment_wins = target_score >= target_pass_threshold
+    target_alignment_weak = target_score < target_failure_threshold if calibrated else target_score < min_target_score
 
     if not calibrated:
         if whisper_source and target_alignment_wins:
@@ -468,7 +575,7 @@ def apply_independent_evidence(
     elif target_alignment_wins:
         status = "PASS_CONFIRMED" if base.status == "PASS_SCREENED" else "PASS_PHONETIC"
         reason = "calibrated target-only CTC supports target phonetic content; cross-language margin is diagnostic"
-    elif target_score < (min_target_score - .15):
+    elif target_score < target_failure_threshold:
         status = "LEXICAL_FAILURE_CONFIRMED"
         reason = "calibrated target-only alignment rejects the target content"
     else:
@@ -477,7 +584,16 @@ def apply_independent_evidence(
     return LinguisticDecision(
         **{**base.__dict__, "status": status, "expected_alignment_score": target_score,
            "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
-           "final_anchor_present": bool(final_anchor) if final_anchor is not None else base.final_anchor_present,
+           "final_anchor_present": (None if final_anchor_evidence is not None else (bool(final_anchor) if final_anchor is not None else base.final_anchor_present)),
+           "final_anchor_evidence": final_anchor_evidence,
+           "char_segments": [dict(item) for item in (alignment_target.get("char_segments") or [])],
+           "native_char_coverage": alignment_target.get("native_char_coverage"),
+           "mean_char_score": alignment_target.get("mean_char_score"),
+           "minimum_char_score": alignment_target.get("minimum_char_score"),
+           "p10_char_score": alignment_target.get("p10_char_score"),
+           "unaligned_characters": list(alignment_target.get("unaligned_characters") or []),
+           "interpolated_characters": list(alignment_target.get("interpolated_characters") or []),
+           "compression_ratio": alignment_target.get("compression_ratio"),
            "evidence_records": records, "evidence_families": families,
            "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
            "calibration_authority": calibrated, "calibration_profile_status": profile_status,
@@ -512,6 +628,11 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           alignment_source_leak_score: float = .75,
                           calibration_authority: bool = False,
                           calibration_profile: Mapping[str, Any] | None = None,
+                          calibration_profile_root: str | Path | None = None,
+                          feature_schema_version: str = "char-alignment-v1",
+                          backend_id: str | None = None,
+                          runtime_lock_sha256: str | None = None,
+                          models_lock_sha256: str | None = None,
                           model_id: str | None = None,
                           model_revision: str | None = None,
                           performance_mode: str | None = None) -> QAResultV2:
@@ -584,6 +705,11 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                 source_language=profile.source_language,
                 calibration_authority=calibration_authority,
                 calibration_profile=calibration_profile,
+                calibration_profile_root=calibration_profile_root,
+                feature_schema_version=feature_schema_version,
+                backend_id=backend_id,
+                runtime_lock_sha256=runtime_lock_sha256,
+                models_lock_sha256=models_lock_sha256,
                 model_id=model_id,
                 model_revision=model_revision,
                 performance_mode=performance_mode,
@@ -602,26 +728,28 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         evidence_hash = lexical_decision.evidence_hashes[0] if lexical_decision.evidence_hashes else None
         alignment_calibrated = bool(
             lexical_decision.calibration_authority
-            and lexical_decision.calibration_profile_status == "MATCHED"
+            and lexical_decision.calibration_profile_status == "MATCHED_VALIDATED"
         )
-        alignment_confirms_content = alignment_calibrated and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.expected_alignment_score is not None and lexical_decision.expected_alignment_score >= alignment_min_target_score
+        target_pass_threshold = _validated_profile_threshold(calibration_profile if alignment_calibrated else None, "target_pass_probability", alignment_min_target_score)
+        source_lid_threshold = _validated_profile_threshold(calibration_profile if alignment_calibrated else None, "source_lid_probability", .70)
+        alignment_confirms_content = alignment_calibrated and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.expected_alignment_score is not None and lexical_decision.expected_alignment_score >= target_pass_threshold
         # A CTC score may rescue a Whisper lexical miss, but it may not
         # silently certify an absent final-word anchor.  ``None`` remains
         # unknown and therefore keeps the hard final-word gate closed.
-        alignment_confirms_final = alignment_confirms_content and lexical_decision.final_anchor_present is True
+        alignment_confirms_final = alignment_confirms_content and _final_anchor_is_calibrated(lexical_decision, profile=calibration_profile, feature_schema_version=feature_schema_version)
         gates["content"] = _gate("content", GateStatus.PASS if (forced_content_ok or alignment_confirms_content) else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_content}, evidence_hash=evidence_hash)
         gates["final_word"] = _gate("final_word", GateStatus.PASS if (forced_final_ok or alignment_confirms_final) else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_final}, evidence_hash=evidence_hash)
         independent_source_lid = bool(
             lid_evidence
             and str((lid_evidence.get("record") or {}).get("evidence_family", "")) == "AUDIO_LANGUAGE_ID"
             and _language_code(lid_evidence.get("language")) == _language_code(profile.source_language)
-            and float(lid_evidence.get("probability", 0.0) or 0.0) >= .70
+            and float(lid_evidence.get("probability", 0.0) or 0.0) >= source_lid_threshold
         )
         independent_target_lid = bool(
             lid_evidence
             and str((lid_evidence.get("record") or {}).get("evidence_family", "")) == "AUDIO_LANGUAGE_ID"
             and _language_code(lid_evidence.get("language")) == _language_code(profile.target_language)
-            and float(lid_evidence.get("probability", 0.0) or 0.0) >= .70
+            and float(lid_evidence.get("probability", 0.0) or 0.0) >= source_lid_threshold
         )
         # Before calibration, a target score can never override a source
         # language gate.  Even after calibration, the override needs a final
@@ -678,12 +806,14 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         # Uncertainty is a hold/review state, never an implicit PASS and never
         # a reason for the cohort scheduler to regenerate the line.
         passed = False
-    if lexical_decision is not None and lexical_decision.status in {
+    if lexical_decision is not None and lexical_decision.status == "BLOCKED":
+        failure = FailureClass.DETERMINISTIC_CALIBRATION
+    elif lexical_decision is not None and lexical_decision.status in {
         "ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED",
         "LANGUAGE_LEAK_STRONG_SUSPICION", "LEXICAL_FAILURE_SUSPECTED",
         "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK",
         "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT", "EVIDENCE_CONFLICT",
-        "ALIGNER_NOT_APPLICABLE", "HUMAN_REVIEW", "BLOCKED",
+        "ALIGNER_NOT_APPLICABLE", "HUMAN_REVIEW",
     }:
         failure = FailureClass.ASR_UNCERTAIN
     elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"}:

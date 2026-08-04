@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import tempfile
 import unittest
 from dataclasses import replace
@@ -13,7 +14,7 @@ from dubbing_pipeline.alignment import _extract_mfa_words
 from dubbing_pipeline.contracts import ContractError, DeliveryWindow, EvidenceFamily, GateStatus, ReferenceEvidence
 from dubbing_pipeline.contracts.manifest import validate_manifest_value
 from dubbing_pipeline.deploy_v2 import DeploymentError, PackageEntry, deploy_atomic_v2, stage_files_v2
-from dubbing_pipeline.hashing import atomic_json, contract_hash
+from dubbing_pipeline.hashing import atomic_json, contract_hash, sha256_file
 from dubbing_pipeline.models import Line
 from dubbing_pipeline.montage import mount_surgical
 from dubbing_pipeline.asr import ASRCache, prepare_whisperx_escalation, transcribe_dual
@@ -28,6 +29,53 @@ from dubbing_pipeline.orchestration_v2 import run_scene_v2
 from dubbing_pipeline.orchestration_v2 import _line_linguistic_summary
 from dubbing_pipeline.post_qa import audit_candidate_stage, audit_scene_stage, persist_audio_atomic
 from dubbing_pipeline.reference import materialize_reference
+
+
+def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dict, Path, Path]:
+    artifact = root / "target_calibrator.bin"
+    runtime_lock = root / "runtime.lock"
+    models_lock = root / "models.lock"
+    artifact.write_bytes(b"validated-calibrator")
+    runtime_lock.write_bytes(b"runtime-lock-for-test")
+    models_lock.write_bytes(b"models-lock-for-test")
+    profile = {
+        "schema": "generic-dubbing-alignment-calibration-profile-v1",
+        "status": "VALIDATED",
+        "authority": True,
+        "profile_id": "de-neutral-whisperx-001",
+        "identity": {
+            "backend_id": "fake-ctc",
+            "model_id": "fake-german",
+            "model_revision": model_revision,
+            "feature_schema_version": "char-alignment-v1",
+            "target_language": "de",
+            "source_language": "en",
+            "performance_modes": ["NEUTRAL"],
+        },
+        "thresholds": {
+            "target_pass_probability": .65,
+            "target_failure_probability": .50,
+            "final_anchor_pass_probability": .65,
+            "source_lid_probability": .70,
+        },
+        "calibrator": {"type": "platt", "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
+        "dataset": {
+            "manifest_sha256": "a" * 64,
+            "labels_sha256": "b" * 64,
+            "split_manifest_sha256": "c" * 64,
+            "calibration_count": 180,
+            "validation_count": 60,
+            "hidden_test_count": 60,
+        },
+        "metrics": {"hidden_false_pass_count": 0, "hidden_false_fail_count": 1, "brier_score": .03, "expected_calibration_error": .02},
+        "provenance": {
+            "code_commit": "d" * 40,
+            "runtime_lock_sha256": sha256_file(runtime_lock),
+            "models_lock_sha256": sha256_file(models_lock),
+            "created_at": "2026-08-04T00:00:00Z",
+        },
+    }
+    return profile, runtime_lock, models_lock
 
 
 class V2ContractsTests(unittest.TestCase):
@@ -238,44 +286,87 @@ class V2QATests(unittest.TestCase):
         self.assertFalse(decision.calibration_authority)
 
     def test_mismatched_calibration_profile_is_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, runtime_lock, models_lock = _validated_profile(root, model_revision="wrong-revision")
+            base = decide_linguistic_evidence(
+                "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+                automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+            )
+            decision = apply_independent_evidence(
+                base,
+                {"target_score": .95, "source_score": .10, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+                calibration_authority=True, calibration_profile=profile, calibration_profile_root=root,
+                backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+                runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
+            )
+            self.assertEqual(decision.status, "BLOCKED")
+            self.assertEqual(decision.calibration_profile_status, "BLOCKED_IDENTITY_MISMATCH")
+            self.assertFalse(decision.confirmed)
+
+    def test_matching_calibration_profile_can_confirm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, runtime_lock, models_lock = _validated_profile(root)
+            base = decide_linguistic_evidence(
+                "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+                automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+            )
+            decision = apply_independent_evidence(
+                base,
+                {"target_score": .95, "source_score": .10, "target": {"final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+                calibration_authority=True, calibration_profile=profile, calibration_profile_root=root,
+                backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+                runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
+            )
+            self.assertEqual(decision.status, "PASS_CONFIRMED")
+            self.assertTrue(decision.confirmed)
+            self.assertEqual(decision.calibration_profile_status, "MATCHED_VALIDATED")
+
+    def test_minimal_profile_cannot_grant_authority(self):
         base = decide_linguistic_evidence(
-            "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
-            automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+            "Hallo", "Hello", forced_target={"text": "Hallo", "language": "de", "probability": .99},
+            automatic={"text": "Hallo", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
         )
         decision = apply_independent_evidence(
             base,
             {"target_score": .95, "source_score": .10, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
             calibration_authority=True,
-            calibration_profile={
-                "schema": "generic-dubbing-calibration-profile-v1", "authority": True,
-                "model_id": "fake-german", "model_revision": "wrong-revision",
-                "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL",
-            },
-            model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+            calibration_profile={"schema": "generic-dubbing-calibration-profile-v1", "authority": True, "model_id": "fake-german", "model_revision": "test", "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL"},
+            backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+            runtime_lock_sha256="a" * 64, models_lock_sha256="b" * 64,
         )
         self.assertEqual(decision.status, "BLOCKED")
-        self.assertEqual(decision.calibration_profile_status, "BLOCKED_IDENTITY_MISMATCH")
-        self.assertFalse(decision.confirmed)
+        self.assertEqual(decision.calibration_profile_status, "BLOCKED_SCHEMA")
 
-    def test_matching_calibration_profile_can_confirm(self):
+    def test_calibration_artifact_and_provenance_contract_is_fail_closed(self):
         base = decide_linguistic_evidence(
-            "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
-            automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+            "Hallo", "Hello", forced_target={"text": "Hallo", "language": "de", "probability": .99},
+            automatic={"text": "Hallo", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
         )
-        decision = apply_independent_evidence(
-            base,
-            {"target_score": .95, "source_score": .10, "target": {"final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
-            calibration_authority=True,
-            calibration_profile={
-                "schema": "generic-dubbing-calibration-profile-v1", "authority": True,
-                "model_id": "fake-german", "model_revision": "test",
-                "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL",
-            },
-            model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
-        )
-        self.assertEqual(decision.status, "PASS_CONFIRMED")
-        self.assertTrue(decision.confirmed)
-        self.assertEqual(decision.calibration_profile_status, "MATCHED")
+        alignment = {"target_score": .95, "source_score": .10, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, runtime_lock, models_lock = _validated_profile(root)
+            common = dict(
+                calibration_authority=True, calibration_profile_root=root,
+                backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+                runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
+            )
+            cases = [
+                ("missing calibrator", lambda value: value.update({"calibrator": {"type": "platt", "artifact_path": str(root / "missing.bin"), "artifact_sha256": "a" * 64}}), "BLOCKED_CALIBRATOR_ARTIFACT"),
+                ("bad calibrator hash", lambda value: value["calibrator"].update({"artifact_sha256": "a" * 64}), "BLOCKED_CALIBRATOR_HASH"),
+                ("feature schema", lambda value: value["identity"].update({"feature_schema_version": "word-alignment-v1"}), "BLOCKED_FEATURE_SCHEMA"),
+                ("runtime provenance", lambda value: value["provenance"].update({"runtime_lock_sha256": "f" * 64}), "BLOCKED_RUNTIME_MODEL_MISMATCH"),
+                ("missing threshold", lambda value: value["thresholds"].pop("target_pass_probability"), "BLOCKED_INCOMPLETE_PROFILE"),
+                ("draft profile", lambda value: value.update({"status": "DRAFT"}), "BLOCKED_PROFILE_STATUS"),
+            ]
+            for name, mutate, expected in cases:
+                candidate = copy.deepcopy(profile)
+                mutate(candidate)
+                decision = apply_independent_evidence(base, alignment, calibration_profile=candidate, **common)
+                self.assertEqual(decision.status, "BLOCKED", name)
+                self.assertEqual(decision.calibration_profile_status, expected, name)
 
     def test_alignment_score_without_whisper_family_cannot_hard_confirm(self):
         base = decide_linguistic_evidence(
@@ -386,7 +477,7 @@ class V2QATests(unittest.TestCase):
             def align(self, segments, _model, _metadata, _audio, _device, **_kwargs):
                 if not isinstance(segments, list):
                     raise AssertionError("outer result object passed to WhisperX.align")
-                return {"word_segments": [{"start": 0.1, "end": 0.3, "word": "Sorge", "score": .9}]}
+                return {"word_segments": [{"start": 0.1, "end": 0.3, "word": "Sorge", "score": .9, "chars": [{"char": char, "start": 0.1 + index * .03, "end": 0.1 + (index + 1) * .03, "score": .9} for index, char in enumerate("Sorge")]}]}
         adapter = WhisperXCTCAligner(device="cpu")
         fake = FakeWhisperX()
         adapter._model = lambda _language: (fake, object(), {})
@@ -495,18 +586,15 @@ class V2SchedulerTests(unittest.TestCase):
         model_id = "fake-german"
         model_revision = "test"
         def align(self, _path, *, text, language):
-            return {"score": .90 if language == "de" else .10, "coverage": 1.0, "final_anchor_present": True, "words": [{"word": token, "score": .9} for token in text.split()]}
+            chars = [{"char": char, "start": index * .02, "end": (index + 1) * .02, "score": .9} for index, char in enumerate(char for char in text if not char.isspace())]
+            return {"score": .90 if language == "de" else .10, "coverage": 1.0, "words": [{"word": token, "score": .9} for token in text.split()], "char_segments": chars}
 
-    @staticmethod
-    def _calibrated_qa() -> QAConfig:
+    def _calibrated_qa(self, root: Path) -> tuple[QAConfig, Path, Path]:
+        profile, runtime_lock, models_lock = _validated_profile(root)
         return QAConfig(
             calibration_authority=True,
-            calibration_profile={
-                "schema": "generic-dubbing-calibration-profile-v1", "authority": True,
-                "model_id": "fake-german", "model_revision": "test",
-                "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL",
-            },
-        )
+            calibration_profile=profile, calibration_profile_root=root,
+        ), runtime_lock, models_lock
 
     def test_qa_is_after_initial_cohort(self):
         order = []; telemetry = TelemetryCollector("test-run")
@@ -546,6 +634,19 @@ class V2SchedulerTests(unittest.TestCase):
         self.assertEqual(report.retry_ids, [])
         self.assertEqual(report.blockers[0]["reason"], "ASR_UNCERTAIN_HOLD")
 
+    def test_blocked_calibration_is_deterministic_and_not_a_retry(self):
+        class Result:
+            passed = False
+            failure_class = __import__("dubbing_pipeline.contracts", fromlist=["FailureClass"]).FailureClass.DETERMINISTIC_CALIBRATION
+        generated = []
+        def generate(values, round_index):
+            generated.append(round_index)
+            return {value: [value] for value in values}
+        report = run_cohorts(["blocked-profile"], item_id=lambda value: value, generate=generate, evaluate=lambda _value: Result())
+        self.assertEqual(generated, [1])
+        self.assertEqual(report.retry_ids, [])
+        self.assertEqual(report.blockers[0]["reason"], "DETERMINISTIC_CALIBRATION_HOLD")
+
     def test_fmv_scene_uses_surgical_mount(self):
         import soundfile as sf
         class Backend:
@@ -558,7 +659,8 @@ class V2SchedulerTests(unittest.TestCase):
             root = Path(directory); ref = root / "ref.wav"; stem = root / "stem.wav"
             sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
             original = np.column_stack([np.ones(24000, dtype="float32") * .02, np.ones(24000, dtype="float32") * .07]); sf.write(stem, original, 24000)
-            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=1, retry_takes=0, qa=self._calibrated_qa())
+            qa, runtime_lock, models_lock = self._calibrated_qa(root)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=1, retry_takes=0, qa=qa, runtime_lock=runtime_lock, models_lock=models_lock)
             line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
             report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=self.FakeCTC())
             self.assertTrue(report["pass"]); self.assertTrue(Path(report["mounted_output"]).is_file())
@@ -579,7 +681,8 @@ class V2SchedulerTests(unittest.TestCase):
             root = Path(directory); ref = root / "ref.wav"; stem = root / "stem.wav"
             sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
             original = np.column_stack([np.ones(24000, dtype="float32") * .02, np.ones(24000, dtype="float32") * .07]); sf.write(stem, original, 24000)
-            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", fmv_initial_takes=2, fmv_retry_takes=0, seed=11, qa=self._calibrated_qa())
+            qa, runtime_lock, models_lock = self._calibrated_qa(root)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", fmv_initial_takes=2, fmv_retry_takes=0, seed=11, qa=qa, runtime_lock=runtime_lock, models_lock=models_lock)
             line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
             report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=self.FakeCTC())
             self.assertTrue(report["pass"], report)
@@ -611,7 +714,8 @@ class V2SchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); ref = root / "ref.wav"
             sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
-            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=2, retry_takes=0, seed=11, qa=self._calibrated_qa())
+            qa, runtime_lock, models_lock = self._calibrated_qa(root)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=2, retry_takes=0, seed=11, qa=qa, runtime_lock=runtime_lock, models_lock=models_lock)
             line = Line("L1", "A", "Hello", "Hallo", 0, 1, topology="LINE_SEPARATED", subtitle_authorized=True, reference_audio=str(ref))
             report = run_scene_v2(Scene("S", "LINE_SEPARATED", [line]), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=SelectiveCTC())
             self.assertTrue(report["pass"], report)

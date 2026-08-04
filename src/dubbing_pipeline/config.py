@@ -39,6 +39,7 @@ class QAConfig:
     # is explicitly enabled and matches the active aligner/runtime identity.
     calibration_authority: bool = False
     calibration_profile: dict[str, Any] = field(default_factory=dict)
+    calibration_profile_root: Path | None = None
     performance_mode: str = "NEUTRAL"
     english_markers: list[str] = field(default_factory=lambda: [
         "the", "you", "what", "why", "yes", "no", "not", "are", "is",
@@ -119,7 +120,10 @@ class PipelineConfig:
             return value
 
         raw = expand(raw)
-        qa = QAConfig(**raw.pop("qa", {}))
+        qa_values = raw.pop("qa", {})
+        if qa_values.get("calibration_profile_root"):
+            qa_values["calibration_profile_root"] = _path(qa_values["calibration_profile_root"], base)
+        qa = QAConfig(**qa_values)
         known = {
             "project_root", "source_language", "target_language", "topology_default",
             "output_root", "cache_root", "model_id", "model_revision", "backend_version", "device", "dtype",
@@ -146,6 +150,8 @@ class PipelineConfig:
         for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root", "runtime_lock", "models_lock"):
             if result.get(key) is not None:
                 result[key] = str(result[key])
+        if result.get("qa", {}).get("calibration_profile_root") is not None:
+            result["qa"]["calibration_profile_root"] = str(result["qa"]["calibration_profile_root"])
         return result
 
     def reproducibility_report(self, *, strict: bool | None = None) -> dict[str, Any]:

@@ -61,6 +61,8 @@ def run_cohorts(items: Iterable[Any], *, item_id: Callable[[Any], str], generate
             retry_ids.append(key)
         elif FailureClass.ASR_UNCERTAIN in failures or FailureClass.ASR_UNCERTAIN.value in failures:
             blockers.append({"line_id": key, "reason": "ASR_UNCERTAIN_HOLD"})
+        elif FailureClass.DETERMINISTIC_CALIBRATION in failures or FailureClass.DETERMINISTIC_CALIBRATION.value in failures:
+            blockers.append({"line_id": key, "reason": "DETERMINISTIC_CALIBRATION_HOLD"})
         else:
             blockers.append({"line_id": key, "reason": "NO_PASSING_CANDIDATE"})
     blockers.extend({"line_id": key, "reason": "NO_PASSING_CANDIDATE"} for key in retry_ids)

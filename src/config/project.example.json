@@ -46,6 +46,7 @@
     "max_seam_notch_db": 12.0,
     "calibration_authority": false,
     "calibration_profile": {},
+    "calibration_profile_root": null,
     "performance_mode": "NEUTRAL",
     "english_markers": ["the", "you", "what", "why", "yes", "no", "not", "are", "is", "can", "will", "this", "that", "your", "to", "of", "and"],
     "strong_source_words": []
