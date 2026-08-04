@@ -1,0 +1,244 @@
+{
+  "schema": "instruction-bundle-validation-v2",
+  "validated_utc": "2026-08-04T18:06:04.221827+00:00",
+  "skills": [
+    {
+      "name": "dialogue-mapping",
+      "path": "skills-src\\dialogue-mapping\\SKILL.md",
+      "sha256": "eef350d766e9d7f4f2772f4aed2f2eaa1cdfdfab27c030ca7ef2aac67fa397ef",
+      "meta_sha256": "2c0c7e2dbb81a04e87fe1565eb2b907a7b61711f614f15bcbd8037b9bb430a93",
+      "phases": [
+        "C"
+      ],
+      "triggers": [
+        "mapear texto a audio",
+        "resolver cue a stream fisico",
+        "verificar trigger de linea",
+        "linea huerfana",
+        "asociar subtitulo con timebase FMV",
+        "anclas ASR insuficientes"
+      ]
+    },
+    {
+      "name": "dubbing-router",
+      "path": "skills-src\\dubbing-router\\SKILL.md",
+      "sha256": "d574f49982e199cb398a79b98536f073ddcc057450590d1e8949809405cbc179",
+      "meta_sha256": "dd1b96c5b6d7185689698fba4bf83b6f51e3764b47bdbc1869ce55265627e027",
+      "phases": [],
+      "triggers": [
+        "determinar fase de trabajo",
+        "no se sabe en que fase estoy",
+        "tarea nueva de doblaje",
+        "enrutar antes de empezar",
+        "distinguir linea separada de FMV",
+        "clasificar topologia de audio"
+      ]
+    },
+    {
+      "name": "fmv-audio",
+      "path": "skills-src\\fmv-audio\\SKILL.md",
+      "sha256": "f5042b416ec8438c85f86f408d5f354052993057220694264c27bd0652b840a7",
+      "meta_sha256": "461944d23be19a006fedbc343ab739ac4bdd62320a59e70d480ed44769f94a09",
+      "phases": [
+        "E",
+        "G",
+        "H"
+      ],
+      "triggers": [
+        "pelicula prerenderizada",
+        "fmv",
+        "audio multiplexado en video",
+        "timing de cutscene",
+        "voz incrustada en usm/webm/bik",
+        "Empalme B",
+        "preservar onomatopeya",
+        "source_resume"
+      ]
+    },
+    {
+      "name": "generation-qa",
+      "path": "skills-src\\generation-qa\\SKILL.md",
+      "sha256": "67a51909e28ff6118e522750d22d96c2843155d43881740888c457192e131ebf",
+      "meta_sha256": "4f6bab39f3f16ab3d217e0bb805df9bcd006426a0397387db28cd5b9ef8aca8b",
+      "phases": [
+        "G",
+        "H",
+        "I"
+      ],
+      "triggers": [
+        "generar tts",
+        "reintentar toma fallida",
+        "qa automatico",
+        "revision perceptual",
+        "compuertas duras",
+        "lineas de voz separadas",
+        "rondas globales FMV",
+        "ultima palabra OmniVoice"
+      ]
+    },
+    {
+      "name": "inventory-roundtrip",
+      "path": "skills-src\\inventory-roundtrip\\SKILL.md",
+      "sha256": "e5bab0539cad75b607c4fb7f3ed951ef91bda4d5b4f50d4463446cc2eb9b9316",
+      "meta_sha256": "c2153b485fbdf110a16d936df1019e55a167c6249eedd14f5d35e51f1ae85077",
+      "phases": [
+        "A",
+        "B"
+      ],
+      "triggers": [
+        "inventario inicial",
+        "round-trip de contenedores",
+        "verificar extraccion antes de mapear"
+      ]
+    },
+    {
+      "name": "packaging-runtime",
+      "path": "skills-src\\packaging-runtime\\SKILL.md",
+      "sha256": "29fe6b16fb63005c3bbc6a79c400cff7bdfda514716816ad2b79a81c1d33ac85",
+      "meta_sha256": "566b5c7ca45f06725ed9e0fd2e7e555564354f5a0adee9fe4f1c646f488675b8",
+      "phases": [
+        "J",
+        "K"
+      ],
+      "triggers": [
+        "empaquetar release",
+        "desplegar mod",
+        "smoke test in-game",
+        "backup antes de deploy"
+      ]
+    },
+    {
+      "name": "text-discovery",
+      "path": "skills-src\\text-discovery\\SKILL.md",
+      "sha256": "a4fcf2820a0543336b44160e1d18b3cb833d44807955938d368588e5584e79dd",
+      "meta_sha256": "1e7f89be3cb9ae806e6f00c5062e8351df57303fd9af94834982461a832f1433",
+      "phases": [
+        "B",
+        "C"
+      ],
+      "triggers": [
+        "texto oficial ausente",
+        "no hay LOCRES",
+        "buscar texto localizado",
+        "cue sin texto asociado"
+      ]
+    },
+    {
+      "name": "text-policy",
+      "path": "skills-src\\text-policy\\SKILL.md",
+      "sha256": "4086856d46f83174bbaef2a7226698edcfe598417a55145431427565cb89e1b0",
+      "meta_sha256": "a92d7659197aa54ba8d1134d6bc70e8ea907a451419e8b15ebfb7fdee00f1416",
+      "phases": [
+        "D"
+      ],
+      "triggers": [
+        "normalizar texto para tts",
+        "decidir keep_original vs tts",
+        "auditoria textual",
+        "texto oficial vs texto de entrega",
+        "separar source_text target_text tts_text",
+        "subtitle-only"
+      ]
+    },
+    {
+      "name": "unknown-game-diagnosis",
+      "path": "skills-src\\unknown-game-diagnosis\\SKILL.md",
+      "sha256": "d1dde992b69ea447a76ff991e9c01ef0f836b1f4a9365508bf058ff877e09e00",
+      "meta_sha256": "272f79808c3628d7a6369388f42a8f3387ec7427c40f8e6d353381f8decf7621",
+      "phases": [
+        "X_DIAGNOSIS"
+      ],
+      "triggers": [
+        "juego nuevo",
+        "motor desconocido",
+        "formato no documentado",
+        "fase bloqueada sin saber por que"
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "rule_id": "AC-57",
+      "path": "rules\\AC-57.md",
+      "sha256": "02ebb70d662cc12125b480d24b711eb761368bdf09aa46807e306925cd3b9e05"
+    },
+    {
+      "rule_id": "AC-58",
+      "path": "rules\\AC-58.md",
+      "sha256": "a55dd9ed0eddeb46cadbe6e5c151772c4dfe0dc9c6d2b15bbdaba5ce484392ae"
+    },
+    {
+      "rule_id": "AC-59",
+      "path": "rules\\AC-59.md",
+      "sha256": "f8aecf67abfad92eab70532b89bcae5156aafdc0f00ca1a802cd28bc334e9d49"
+    },
+    {
+      "rule_id": "AC-60",
+      "path": "rules\\AC-60.md",
+      "sha256": "0574158bd49e62227a23898daeafd971cb95605ef0de84b19d7a4ea7f0571901"
+    },
+    {
+      "rule_id": "AC-61",
+      "path": "rules\\AC-61.md",
+      "sha256": "4d2821a6d4aa3b5cb5d8da320cf3a495414a9f4a28860099c7115885e5b9fa61"
+    },
+    {
+      "rule_id": "AC-62",
+      "path": "rules\\AC-62.md",
+      "sha256": "486c4473b1bf32bbdb1e7200e4c9c51b5e1e4db62de0c975b81ab8c4eeaf121e"
+    },
+    {
+      "rule_id": "AC-63",
+      "path": "rules\\AC-63.md",
+      "sha256": "4e9cbaa51eaf397a61da31930b9c9827739b7fcefb9f2e2541177376b83a9ef5"
+    },
+    {
+      "rule_id": "AC-64",
+      "path": "rules\\AC-64.md",
+      "sha256": "a5de40b69b74cf4adab9c4aa7ebf832663fba3b16ba812f7aafbd38ac83d1e50"
+    },
+    {
+      "rule_id": "AC-65",
+      "path": "rules\\AC-65.md",
+      "sha256": "ccdc93a4e10f021966c7f571bc7470c20f827e17b78d2318589878b1b02aed1b"
+    },
+    {
+      "rule_id": "AC-66",
+      "path": "rules\\AC-66.md",
+      "sha256": "08bbf575bbf881ce064a8b25669c6d1440ef3ab544183a90b736098fe860fd64"
+    }
+  ],
+  "external_references": [
+    "docs/GATE_OWNERSHIP.md",
+    "docs/adapters/<juego-o-motor>/",
+    "docs/adapters/_template/",
+    "docs/canonical/10_PREFLIGHT_AND_MAPPING.md",
+    "docs/canonical/20_TOPOLOGIES_AND_TEXT_POLICY.md",
+    "docs/canonical/40_AUDIO_TIMING_AND_FMV.md",
+    "docs/canonical/50_QA_AND_REGENERATION.md",
+    "docs/canonical/60_PACKAGE_DEPLOY_AND_SMOKE.md",
+    "docs/canonical/X_DIAGNOSIS.md",
+    "docs/lessons/pending/C.jsonl",
+    "docs/lessons/pending/D.jsonl",
+    "docs/lessons/pending/G.jsonl",
+    "docs/lessons/pending/H.jsonl",
+    "docs/phases/A_INVENTORY.md",
+    "docs/phases/B_ROUNDTRIP.md",
+    "docs/phases/C_MAPPING.md",
+    "docs/phases/D_TEXT_POLICY.md",
+    "docs/phases/E_MASTER_PLAN.md",
+    "docs/phases/F_CALIBRATION.md",
+    "docs/phases/G_GENERATION_AND_MONTAGE.md",
+    "docs/phases/H_AUTOMATIC_QA.md",
+    "docs/phases/I_PERCEPTUAL_REVIEW.md",
+    "docs/phases/J_PACKAGING.md",
+    "docs/phases/K_DEPLOY_AND_SMOKE.md",
+    "scripts/build_session_packet.py",
+    "scripts/context_router.py",
+    "scripts/control",
+    "scripts/operation_guard.py",
+    "scripts/test_operation_guard.py"
+  ],
+  "self_contained_code": true,
+  "kiro_included": false
+}

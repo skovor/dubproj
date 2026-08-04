@@ -49,12 +49,26 @@ def mono(audio):
 def resample_exact(audio, source_rate: int, target_rate: int):
     if source_rate == target_rate:
         return _np().asarray(audio, dtype="float32")
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("sample rates must be positive")
+    np = _np(); value = np.asarray(audio, dtype="float32")
     try:
         import librosa
-        result = librosa.resample(_np().asarray(audio, dtype="float32"), orig_sr=source_rate, target_sr=target_rate, res_type="soxr_vhq")
-    except ImportError as exc:
-        raise RuntimeError("resampling requires the optional audio dependencies") from exc
-    return _np().asarray(result, dtype="float32")
+        # soundfile's canonical layout is (frames, channels); never let a
+        # multichannel array be resampled along its channel axis.
+        result = librosa.resample(value, orig_sr=source_rate, target_sr=target_rate, res_type="soxr_vhq", axis=0)
+    except (ImportError, ModuleNotFoundError):
+        # A deterministic linear fallback keeps contract/audit operations
+        # usable without the optional DSP stack. Production can select soxr.
+        old_frames = value.shape[0]
+        new_frames = max(1, round(old_frames * target_rate / source_rate))
+        old_x = np.linspace(0.0, 1.0, old_frames, endpoint=False)
+        new_x = np.linspace(0.0, 1.0, new_frames, endpoint=False)
+        if value.ndim == 1:
+            result = np.interp(new_x, old_x, value)
+        else:
+            result = np.column_stack([np.interp(new_x, old_x, value[:, channel]) for channel in range(value.shape[1])])
+    return np.asarray(result, dtype="float32")
 
 
 def active_span(audio, sample_rate: int, top_db: float = 35.0) -> tuple[int, int]:

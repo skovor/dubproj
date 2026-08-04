@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import math
 from pathlib import Path
 
 
@@ -22,6 +23,8 @@ def speech_end(audio, sample_rate: int, floor_db: float = -45.0) -> float:
 
 def atempo_chain(ratio: float) -> str:
     stages, value = [], float(ratio)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("atempo ratio must be finite and positive")
     while value > 2.0:
         stages.append(2.0); value /= 2.0
     while value < .5:
@@ -51,7 +54,7 @@ def correct_length(audio, sample_rate: int, reference_end: float, ffmpeg: str | 
     source, output = tmpdir / "timing_in.wav", tmpdir / "timing_out.wav"
     write(source, audio, sample_rate)
     command = [str(ffmpeg), "-y", "-i", str(source), "-af", atempo_chain(ratio), "-loglevel", "error", str(output)]
-    completed = subprocess.run(command, capture_output=True)
+    completed = subprocess.run(command, capture_output=True, timeout=120, text=True, encoding="utf-8", errors="replace")
     if completed.returncode or not output.is_file():
         info.update({"method": "atempo_failed", "returncode": completed.returncode})
         return np.asarray(audio), info

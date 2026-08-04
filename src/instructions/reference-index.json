@@ -1,0 +1,11 @@
+{
+  "schema": "portable-instruction-reference-index-v2",
+  "policy": "The sanitized bundle is executable and reviewable; private canonical lesson documents are not copied.",
+  "external_authority": [
+    "docs/canonical/",
+    "docs/phases/",
+    "docs/lessons/"
+  ],
+  "missing_references_are": "EXTERNAL_AUTHORITY_NOT_A_RUNTIME_DEPENDENCY",
+  "kiro": "excluded"
+}

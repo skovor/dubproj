@@ -1,0 +1,18 @@
+{
+  "schema": "generic-dubbing-rule-promotion-v2",
+  "source_manifest": "PROMOTION_MANIFEST.json",
+  "bundle_manifest": "BUNDLE_MANIFEST_V2.json",
+  "provenance_policy": "Every promoted body is addressable and hash-verifiable; private lesson paths remain external.",
+  "rules": [
+    {"rule_id":"AC-57","path":"rules/AC-57.md","body_sha256":"02ebb70d662cc12125b480d24b711eb761368bdf09aa46807e306925cd3b9e05"},
+    {"rule_id":"AC-58","path":"rules/AC-58.md","body_sha256":"a55dd9ed0eddeb46cadbe6e5c151772c4dfe0dc9c6d2b15bbdaba5ce484392ae"},
+    {"rule_id":"AC-59","path":"rules/AC-59.md","body_sha256":"f8aecf67abfad92eab70532b89bcae5156aafdc0f00ca1a802cd28bc334e9d49"},
+    {"rule_id":"AC-60","path":"rules/AC-60.md","body_sha256":"0574158bd49e62227a23898daeafd971cb95605ef0de84b19d7a4ea7f0571901"},
+    {"rule_id":"AC-61","path":"rules/AC-61.md","body_sha256":"4d2821a6d4aa3b5cb5d8da320cf3a495414a9f4a28860099c7115885e5b9fa61"},
+    {"rule_id":"AC-62","path":"rules/AC-62.md","body_sha256":"486c4473b1bf32bbdb1e7200e4c9c51b5e1e4db62de0c975b81ab8c4eeaf121e"},
+    {"rule_id":"AC-63","path":"rules/AC-63.md","body_sha256":"4e9cbaa51eaf397a61da31930b9c9827739b7fcefb9f2e2541177376b83a9ef5"},
+    {"rule_id":"AC-64","path":"rules/AC-64.md","body_sha256":"a5de40b69b74cf4adab9c4aa7ebf832663fba3b16ba812f7aafbd38ac83d1e50"},
+    {"rule_id":"AC-65","path":"rules/AC-65.md","body_sha256":"ccdc93a4e10f021966c7f571bc7470c20f827e17b78d2318589878b1b02aed1b"},
+    {"rule_id":"AC-66","path":"rules/AC-66.md","body_sha256":"08bbf575bbf881ce064a8b25669c6d1440ef3ab544183a90b736098fe860fd64"}
+  ]
+}

@@ -14,6 +14,7 @@ from .mapping import validate_scene
 from .models import Candidate, Scene
 from .policy import BLOCKED, KEEP_ORIGINAL, classify_line
 from .qa import GateResult, evaluate_candidate, select_passed
+from .reference import materialize_reference
 
 
 def _reference_for(line, project_root: Path) -> str | None:
@@ -92,7 +93,13 @@ def run_scene(scene: Scene, config: PipelineConfig, *, runtime: GenerationRuntim
             row["status"] = "KEEP_ORIGINAL"; report["lines"].append(row); continue
         if decision.policy == BLOCKED:
             row["status"] = "REVIEW"; report["review"].append({"id": line.id, "reason": decision.reason}); report["lines"].append(row); continue
-        reference = _reference_for(line, config.project_root)
+        try:
+            reference = materialize_reference(line, config.project_root, config.cache_root, language=config.source_language).audio_path
+        except Exception:
+            # Keep the legacy diagnostic path for callers that explicitly use
+            # an external reference provider, but never silently mix a segment
+            # transcript with the full stem when materialization is possible.
+            reference = _reference_for(line, config.project_root)
         if not reference or not Path(reference).is_file():
             row.update({"status": "REVIEW", "failure": "MISSING_REFERENCE"}); report["review"].append({"id": line.id, "reason": "MISSING_REFERENCE"}); report["lines"].append(row); continue
         candidates = generate_candidates(runtime, line, reference, config, cache_root=config.cache_root)
@@ -105,8 +112,12 @@ def run_scene(scene: Scene, config: PipelineConfig, *, runtime: GenerationRuntim
                     transcript, language, probability = evaluator(candidate_path, line)
                 else:
                     transcript, language, probability = _transcribe(asr, candidate_path)
-                expected_frames = _target_frames(line, stem_rate) if scene.topology != "LINE_SEPARATED" else None
-                result = evaluate_candidate(candidate.path, line, target_sample_rate=stem_rate, target_frames=expected_frames, reference_end=(line.end - line.start) if scene.topology != "LINE_SEPARATED" else None, transcript=transcript, language=language, language_probability=probability, config=config)
+                # Raw QA is measured at the producer's native rate. Window
+                # frames/tail are evaluated after processing and montage; a
+                # raw candidate must not be rejected merely because it still
+                # needs explicit resampling or duration correction.
+                native_rate = int(getattr(config, "native_sample_rate", stem_rate))
+                result = evaluate_candidate(candidate.path, line, target_sample_rate=native_rate, target_frames=None, reference_end=None, transcript=transcript, language=language, language_probability=probability, config=config)
                 candidate.passed = result.passed; candidate.hard_gates = result.gates; candidate.diagnostics = result.diagnostics; candidate.failure_class = result.failure_class
                 evaluations.append((candidate, result))
 
@@ -123,7 +134,7 @@ def run_scene(scene: Scene, config: PipelineConfig, *, runtime: GenerationRuntim
         else:
             candidate, result = chosen; row.update({"status": "PASS", "candidate": candidate.to_dict(), "qa": result.diagnostics})
             if scene.topology == "EMBEDDED_FMV":
-                working_stem = _mount_line(working_stem, read(candidate.path)[0], line, stem_rate, scene.dialogue_channel)
+                working_stem = _mount_line(working_stem, read(candidate.path), line, stem_rate, scene.dialogue_channel)
             else:
                 target = out / f"{line.id}.{Path(candidate.path).suffix.lstrip('.') or 'wav'}"; shutil.copy2(candidate.path, target); row["output"] = str(target)
         persist_candidates(out / f"{line.id}.candidates.json", candidates)

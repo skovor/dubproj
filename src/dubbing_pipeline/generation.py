@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .config import PipelineConfig
-from .hashing import atomic_json, contract_hash
+from .hashing import atomic_json, contract_hash, sha256_file
 from .models import Candidate, Line
 from .policy import append_ellipsis
 
@@ -35,12 +35,20 @@ class OmniVoiceBackend:
         self._config_class = OmniVoiceGenerationConfig
         self.model = OmniVoice.from_pretrained(config.model_id, device_map=config.device, dtype=getattr(torch, config.dtype, torch.float16))
         self.generation_config = OmniVoiceGenerationConfig(num_step=config.generation_steps, guidance_scale=config.guidance_scale)
+        self.native_sample_rate = int(getattr(config, "native_sample_rate", 24000))
 
-    def generate(self, *, text: str, language: str, ref_audio: str, ref_text: str) -> Any:
-        output = self.model.generate(text=[text], language=[language], ref_audio=[ref_audio], ref_text=[ref_text], generation_config=self.generation_config)[0]
-        if hasattr(output, "detach"):
-            output = output.detach().cpu().numpy()
-        return output.squeeze()
+    def generate_batch(self, payload: list[dict[str, Any]]) -> list[Any]:
+        output = self.model.generate(text=[item["text"] for item in payload], language=[item["language"] for item in payload], ref_audio=[item["ref_audio"] for item in payload], ref_text=[item["ref_text"] for item in payload], generation_config=self.generation_config)
+        result = []
+        for item in output:
+            if hasattr(item, "detach"):
+                item = item.detach().cpu().numpy()
+            result.append((item.squeeze(), self.native_sample_rate))
+        return result
+
+    def generate(self, *, text: str, language: str, ref_audio: str, ref_text: str, **_kwargs: Any) -> Any:
+        output = self.generate_batch([{"text": text, "language": language, "ref_audio": ref_audio, "ref_text": ref_text}])[0]
+        return output
 
 
 def synthesis_text(line: Line, config: PipelineConfig) -> str:
@@ -49,10 +57,19 @@ def synthesis_text(line: Line, config: PipelineConfig) -> str:
 
 
 def generation_key(line: Line, ref_audio: str, config: PipelineConfig) -> str:
+    reference_hash = sha256_file(ref_audio) if Path(ref_audio).is_file() else None
     return contract_hash("generation", {
         "line_id": line.id, "source_text": line.source_text,
         "target_text": line.effective_target_text, "tts_text": synthesis_text(line, config),
         "language": config.target_language, "model_id": config.model_id,
+        "model_revision": getattr(config, "model_revision", "unknown"),
+        "backend_version": getattr(config, "backend_version", "unknown"),
+        "generation_steps": config.generation_steps, "guidance_scale": config.guidance_scale,
+        "native_sample_rate": getattr(config, "native_sample_rate", config.sample_rate),
+        "seed": getattr(config, "seed", None), "temperature": getattr(config, "temperature", None),
+        "t_shift": getattr(config, "t_shift", None), "postprocess_output": getattr(config, "postprocess_output", "none"),
+        "text_normalization_version": getattr(config, "text_normalization_version", "ellipsis-v1"),
+        "reference_audio_sha256": reference_hash,
     }, [ref_audio])
 
 
@@ -69,8 +86,27 @@ def generate_candidates(runtime: GenerationRuntime, line: Line, ref_audio: str, 
     for take in range(1, int(count) + 1):
         path = _take_path(root, key, round_index, take); path.parent.mkdir(parents=True, exist_ok=True)
         if not path.is_file():
-            audio = runtime.backend.generate(text=synthesis_text(line, config), language=config.target_language, ref_audio=ref_audio, ref_text=line.reference_text)
-            sf.write(str(path), audio, config.sample_rate)
+            output = runtime.backend.generate(text=synthesis_text(line, config), language=config.target_language, ref_audio=ref_audio, ref_text=line.reference_text)
+            output_rate = getattr(config, "native_sample_rate", config.sample_rate)
+            if isinstance(output, tuple) and len(output) == 2:
+                output, output_rate = output
+            if hasattr(output, "detach"):
+                output = output.detach().cpu().numpy()
+            sf.write(str(path), output, int(output_rate))
+        else:
+            try:
+                info = sf.info(str(path))
+                expected_rate = int(getattr(config, "native_sample_rate", config.sample_rate))
+                if info.samplerate != expected_rate or info.frames <= 0:
+                    path.unlink()
+                    raise ValueError("stale or corrupt candidate cache")
+            except Exception:
+                if path.exists(): path.unlink()
+                output = runtime.backend.generate(text=synthesis_text(line, config), language=config.target_language, ref_audio=ref_audio, ref_text=line.reference_text)
+                output_rate = getattr(config, "native_sample_rate", config.sample_rate)
+                if isinstance(output, tuple) and len(output) == 2:
+                    output, output_rate = output
+                sf.write(str(path), output, int(output_rate))
         candidates.append(Candidate(line.id, str(path), round_index, take, synthesis_text(line, config), key))
     if should_retry and should_retry(candidates):
         retry_count = config.fmv_retry_takes if line.topology == "EMBEDDED_FMV" else config.retry_takes

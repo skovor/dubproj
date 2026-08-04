@@ -35,4 +35,7 @@ The original instruction system remains the authoritative build environment.
 After changing a skill or promoting a lesson there, run its source resync,
 skill build and packet validators, then copy only the generic artifacts into
 this directory. This repository is a reviewable, sanitized distribution; it
-is not a copy of any game's private corpus.
+is not a copy of any game's private corpus. The V2 bundle includes
+`scripts/validate_instructions.py`, `reference-index.json` and a generated
+`BUNDLE_MANIFEST_V2.json` so its local files and hashes can be checked without
+pretending that private canonical lesson documents are present.

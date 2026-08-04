@@ -20,9 +20,9 @@ class QAConfig:
     """Hard-gate and diagnostic policy shared by both topologies."""
 
     hard_gates: list[str] = field(default_factory=lambda: [
-        "not_empty", "source_language", "tail", "final_word", "content",
-        "splice_seam", "splice_boundary", "splice_speech_timing", "lufs",
-        "clipping", "frames",
+        "not_empty", "finite_audio", "sample_rate", "channels", "frames",
+        "clipping", "active_loudness", "source_language", "tail",
+        "final_word", "content", "serialization_contract",
     ])
     diagnostic_metrics: list[str] = field(default_factory=lambda: [
         "text", "wer", "onset", "span", "rate", "pause", "pitch_identity",
@@ -55,6 +55,8 @@ class PipelineConfig:
     output_root: Path = Path("artifacts")
     cache_root: Path = Path("cache")
     model_id: str = "k2-fsa/OmniVoice"
+    model_revision: str = "unknown"
+    backend_version: str = "unknown"
     device: str = "cuda"
     dtype: str = "float16"
     generation_steps: int = 32
@@ -65,6 +67,13 @@ class PipelineConfig:
     fmv_retry_takes: int = 4
     append_ellipsis_experiment: bool = True
     sample_rate: int = 48000
+    native_sample_rate: int = 24000
+    channels: int = 1
+    seed: int | None = None
+    temperature: float | None = None
+    t_shift: float | None = None
+    postprocess_output: str = "none"
+    text_normalization_version: str = "ellipsis-v1"
     dialogue_channel: int = 0
     ffmpeg: Path | None = None
     vgmstream: Path | None = None
@@ -72,6 +81,8 @@ class PipelineConfig:
     runtime_root: Path | None = None
     runtime_adapter: str | None = None
     reference_root: Path | None = None
+    lab_mode: bool = True
+    sandbox_root: Path | None = None
     qa: QAConfig = field(default_factory=QAConfig)
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -94,14 +105,14 @@ class PipelineConfig:
         qa = QAConfig(**raw.pop("qa", {}))
         known = {
             "project_root", "source_language", "target_language", "topology_default",
-            "output_root", "cache_root", "model_id", "device", "dtype",
+            "output_root", "cache_root", "model_id", "model_revision", "backend_version", "device", "dtype",
             "generation_steps", "guidance_scale", "initial_takes", "retry_takes",
             "fmv_initial_takes", "fmv_retry_takes", "append_ellipsis_experiment",
-            "sample_rate", "dialogue_channel", "ffmpeg", "vgmstream", "vgaudio",
-            "runtime_root", "runtime_adapter", "reference_root",
+            "sample_rate", "native_sample_rate", "channels", "seed", "temperature", "t_shift", "postprocess_output", "text_normalization_version", "dialogue_channel", "ffmpeg", "vgmstream", "vgaudio",
+            "runtime_root", "runtime_adapter", "reference_root", "lab_mode", "sandbox_root",
         }
         values = {key: raw.pop(key) for key in list(raw) if key in known}
-        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root"):
+        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root"):
             if key in values:
                 values[key] = _path(values[key], base)
         values["qa"] = qa
@@ -114,7 +125,7 @@ class PipelineConfig:
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root"):
+        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root"):
             if result.get(key) is not None:
                 result[key] = str(result[key])
         return result

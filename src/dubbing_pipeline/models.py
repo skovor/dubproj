@@ -58,7 +58,7 @@ class Line:
             "subtitle_authorized", "movie_identity_verified", "card_identity_verified",
             "card_timebase_verified", "force_keep_original", "preserve_reason",
             "synthesis_text_override", "delivery_text", "speech_start", "speech_end",
-            "preserved_source_intervals", "source_resume",
+            "preserved_source_intervals", "source_resume", "metadata",
         }
         data = {key: value[key] for key in known if key in value}
         data["id"] = str(data["id"])
@@ -69,6 +69,9 @@ class Line:
         if topology:
             data["topology"] = topology
         data["metadata"] = {key: item for key, item in value.items() if key not in known}
+        metadata = dict(value.get("metadata") or {})
+        metadata.update({key: item for key, item in value.items() if key not in known})
+        data["metadata"] = metadata
         return cls(**data)
 
     @property
@@ -82,7 +85,12 @@ class Line:
     @property
     def reference_text(self) -> str:
         """The transcript that describes ref_audio: always source language."""
-        return self.source_text
+        # A reference segment is the physical source of truth.  Falling back
+        # to source_text is safe only for a full-file reference with no
+        # segment-level transcript.  This prevents ref_audio/ref_text drift
+        # when a line is cut from a longer English stem.
+        texts = [segment.text.strip() for segment in self.reference_segments if segment.text.strip()]
+        return " ".join(texts) if texts else self.source_text
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -107,13 +115,15 @@ class Scene:
         if topology == "EMBEDDED_FMV" and value.get("movie_identity_verified"):
             for line in lines:
                 line.movie_identity_verified = True
-        known = {"id", "topology", "lines", "source_stem", "dialogue_channel", "movie_identity_verified"}
+        known = {"id", "topology", "lines", "source_stem", "dialogue_channel", "movie_identity_verified", "metadata"}
+        metadata = dict(value.get("metadata") or {})
+        metadata.update({key: item for key, item in value.items() if key not in known})
         return cls(
             id=str(value["id"]), topology=topology, lines=lines,
             source_stem=value.get("source_stem"),
             dialogue_channel=int(value.get("dialogue_channel", 0)),
             movie_identity_verified=bool(value.get("movie_identity_verified", False)),
-            metadata={key: item for key, item in value.items() if key not in known},
+            metadata=metadata,
         )
 
     def to_dict(self) -> dict[str, Any]:

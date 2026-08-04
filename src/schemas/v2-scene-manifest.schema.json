@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dubproj.dev/schema/v2-scene-manifest.json",
+  "title": "Generic dubbing V2 scene manifest",
+  "type": "object",
+  "required": ["id", "topology", "lines"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "topology": {"enum": ["LINE_SEPARATED", "IN_ENGINE_TIMELINE", "EMBEDDED_FMV"]},
+    "source_stem": {"type": ["string", "null"]},
+    "dialogue_channel": {"type": "integer", "minimum": 0},
+    "movie_identity_verified": {"type": "boolean"},
+    "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "duration_samples": {"type": "integer", "exclusiveMinimum": 0},
+    "extensions": {"type": "object"},
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "speaker", "source_text", "target_text", "start", "end"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "speaker": {"type": "string"},
+          "source_text": {"type": "string"},
+          "target_text": {"type": "string"},
+          "start": {"type": "number", "minimum": 0},
+          "end": {"type": "number", "exclusiveMinimum": 0},
+          "topology": {"type": "string"},
+          "source_audio": {"type": ["string", "null"]},
+          "reference_audio": {"type": ["string", "null"]},
+          "reference_segments": {"type": "array"},
+          "subtitle_authorized": {"type": "boolean"},
+          "movie_identity_verified": {"type": "boolean"},
+          "card_identity_verified": {"type": "boolean"},
+          "card_timebase_verified": {"type": "boolean"},
+          "force_keep_original": {"type": "boolean"},
+          "preserve_reason": {"type": ["string", "null"]},
+          "synthesis_text_override": {"type": ["string", "null"]},
+          "delivery_text": {"type": ["string", "null"]},
+          "speech_start": {"type": ["number", "null"]},
+          "speech_end": {"type": ["number", "null"]},
+          "preserved_source_intervals": {"type": "array"},
+          "source_resume": {"type": ["number", "null"]},
+          "extensions": {"type": "object"}
+        }
+      }
+    }
+  }
+}

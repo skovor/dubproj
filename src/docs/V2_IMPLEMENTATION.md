@@ -1,0 +1,67 @@
+# V2 implementation and measurement report
+
+This branch implements the plan maestro as a guarded strangler migration. The
+functional `main` worktree is untouched; P3R data is referenced read-only by a
+hash-only baseline in the external sandbox.
+
+## Implemented invariants
+
+- `contracts/` rejects unknown fields, missing IDs, invalid windows, undeclared
+  FMV overlap and malformed evidence. Gate values are typed (`PASS`, `FAIL`,
+  `NOT_APPLICABLE`, `NOT_RUN`, `ERROR`).
+- `reference.py` materializes the declared sample range/channel and pairs that
+  exact audio hash with its segment transcript. `Line.reference_text` now uses
+  segment text instead of blindly using the full source sentence.
+- `generation_v2.py` keeps one backend runtime, uses a batch method when the
+  backend exposes one, preserves native sample rate, validates readback and
+  hashes every generation parameter that can change audio.
+- `hashing.py` uses unique temporary files, fsync/readback and semantic hashes
+  that do not change when a reference moves to another machine.
+- `qa_v2.py` measures finite audio, rate, channels, frames, clipping, active
+  level, tail, content order, final-word suffix and source-language leakage.
+  Missing ASR is `NOT_RUN`, never a fabricated PASS. Ranking cannot rescue a
+  failed candidate.
+- `montage.py` replaces only the declared speech mask, preserves Empalme B
+  intervals and resume tails, keeps non-dialogue channels sample-identical and
+  rejects a body that would be actively cut.
+- `deploy_v2.py` validates relative paths, records EXISTS/ABSENT pre-state and
+  removes newly created files during rollback. `package.py` now delegates to
+  this implementation.
+- `scheduler.py`, `state.py` and `telemetry.py` implement global cohorts,
+  run-scoped events and append-only resumable state. Retry candidates are
+  limited to stochastic TTS failures.
+- The CLI has `preflight`, `plan`, `status`, `resume` and explicit dry-run
+  heavy-phase commands. `lab_mode` requires sandbox roots before work starts.
+- `validate_instructions.py`, `reference-index.json`, and the V2 promotion
+  manifest make the sanitized skill bundle reproducible without copying KIRO
+  or private lesson corpora.
+
+## Baseline and benchmark
+
+The external sandbox reports are:
+
+`work/sandbox/p3r-pipeline-v2/data/input_manifest/BASELINE_MANIFEST.json`
+
+and
+
+`work/sandbox/p3r-pipeline-v2/reports/performance/before_after.json`.
+
+The baseline records the frozen commit `5ca877e`, 20 P3R scene reports, and the
+current summary (`required=170`, `mounted=170`, `release_ready=false` because
+perceptual review remains a real gate). Its 1,350 legacy timing rows sum to
+304.44 minutes (QA 198.65 min, generation 89.27 min, continuous audit 13.23
+min, mount 3.29 min); those rows are explicitly marked not run-scoped, so they
+are a historical reference rather than a precise per-run benchmark. It does
+not copy or write production audio.
+
+The benchmark compares 170 synthetic units: roughly 0.266 s legacy vs 0.044 s
+V2 (6.00x in the latest synthetic harness), while the old QA admitted 5 known bad cases
+and V2 admitted 0. These are architecture/QA measurements, not a claim about
+OmniVoice GPU throughput; the report lists the limitations.
+
+## Still intentionally gated
+
+The branch does not load OmniVoice weights, rewrite the real P3R output, or
+claim an in-game smoke result. The next safe phase is a P3R 16–24-line
+microset through the adapter, followed by legacy/V2 shadow classification and
+only then a full 20-scene run in a disposable runtime clone.

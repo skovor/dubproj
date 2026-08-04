@@ -29,3 +29,12 @@ See `src/docs/GPT_REVIEW_PROMPT.md` for an evidence-only external review and
 The portable instruction layer (nine skills plus promoted AC-57…AC-66 rules)
 is under [`src/instructions/`](src/instructions/README.md). It is sanitized:
 no KIRO files, game corpus, audio, credentials or model data are included.
+
+## Pipeline V2 (branch `refactor/p3r-pipeline-v2`)
+
+V2 is the active laboratory path for the strangler migration. It adds strict
+contracts, exact reference materialization, native-rate generation/cache
+evidence, measured QA, surgical FMV montage, cohort scheduling, resumable
+state, telemetry and transactional deploy. The P3R adapter contains no local
+production path. See `src/docs/V2_IMPLEMENTATION.md` for the audit mapping and
+the external sandbox reports.
