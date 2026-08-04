@@ -51,7 +51,9 @@ def run_cohorts(items: Iterable[Any], *, item_id: Callable[[Any], str], generate
             evaluations.setdefault(key, []).extend(evaluate(candidate) for candidate in rows)
     retry_ids = [key for key, results in evaluations.items() if not any(getattr(result, "passed", False) for result in results)]
     blockers.extend({"line_id": key, "reason": "NO_PASSING_CANDIDATE"} for key in retry_ids)
-    phases.extend(["SELECT_WINNERS", "MOUNT_SCENES", "SERIALIZATION_AUDIT", "CONTINUOUS_AUDIT", "PACKAGE", "PACKAGE_ROUNDTRIP", "DEPLOY_TRANSACTION", "RUNTIME_SMOKE"])
+    # Selection, processing, mounting, serialization and deployment are owned
+    # by the caller.  Do not advertise those phases merely because they exist
+    # in the global phase vocabulary; a report must contain executed evidence.
     return CohortReport(collector.run_id, phases, candidates, evaluations, retry_ids, blockers)
 
 

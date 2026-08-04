@@ -21,6 +21,16 @@ hash-only baseline in the external sandbox.
   level, tail, content order, final-word suffix and source-language leakage.
   Missing ASR is `NOT_RUN`, never a fabricated PASS. Ranking cannot rescue a
   failed candidate.
+- `post_qa.py` makes the delivery boundary explicit: every raw candidate is
+  re-audited after processing, after surgical mounting, and after reopening
+  the serialized artifact. FMV scenes receive a final full-scene audit that
+  checks frame/rate/channel contracts, protected Empalme B samples and
+  byte-identical non-dialogue channels. A raw PASS is therefore never emitted
+  as `FINAL_PASS`.
+- `orchestration_v2.py` selects line-separated winners only after serialized
+  QA and selects FMV winners from bounded candidate combinations that pass the
+  complete scene audit. Failed post-transform stages remain in the report as
+  stage evidence instead of silently disappearing.
 - `montage.py` replaces only the declared speech mask, preserves Empalme B
   intervals and resume tails, keeps non-dialogue channels sample-identical and
   rejects a body that would be actively cut.
@@ -29,7 +39,10 @@ hash-only baseline in the external sandbox.
   this implementation.
 - `scheduler.py`, `state.py` and `telemetry.py` implement global cohorts,
   run-scoped events and append-only resumable state. Retry candidates are
-  limited to stochastic TTS failures.
+  limited to stochastic TTS failures. The cohort scheduler no longer reports
+  selection, mounting, packaging or runtime smoke phases that it did not
+  execute; the owning orchestration layer appends those stages only after
+  evidence exists.
 - The CLI has `preflight`, `plan`, `status`, `resume` and explicit dry-run
   heavy-phase commands. `lab_mode` requires sandbox roots before work starts.
 - `validate_instructions.py`, `reference-index.json`, and the V2 promotion

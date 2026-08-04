@@ -21,6 +21,7 @@ from dubbing_pipeline.generation_v2 import GenerationRuntimeV2
 from dubbing_pipeline.generation_v2 import GenerationRequest
 from dubbing_pipeline.models import Scene
 from dubbing_pipeline.orchestration_v2 import run_scene_v2
+from dubbing_pipeline.post_qa import audit_candidate_stage, audit_scene_stage, persist_audio_atomic
 from dubbing_pipeline.reference import materialize_reference
 
 
@@ -90,6 +91,45 @@ class V2QATests(unittest.TestCase):
             self.assertTrue(passed.passed)
 
 
+class V2PostTransformTests(unittest.TestCase):
+    def test_post_transform_audit_is_fail_closed_and_reopens_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = persist_audio_atomic(Path(directory) / "processed.wav", np.ones(2400, dtype="float32") * .1, 24000)
+            missing_asr = audit_candidate_stage(
+                path,
+                stage="PROCESSED_QA",
+                expected_text="Hallo",
+                target_sample_rate=24000,
+                target_frames=2400,
+                channels=1,
+                transcript=None,
+            )
+            self.assertFalse(missing_asr.passed)
+            self.assertEqual(missing_asr.gates["content"].status, GateStatus.NOT_RUN)
+            good = audit_candidate_stage(
+                path,
+                stage="SERIALIZED_QA",
+                expected_text="Hallo",
+                target_sample_rate=24000,
+                target_frames=2400,
+                channels=1,
+                transcript="Hallo",
+                language="de",
+                language_probability=.99,
+            )
+            self.assertTrue(good.passed)
+            self.assertEqual(good.artifact_sha256, __import__("dubbing_pipeline.hashing", fromlist=["sha256_file"]).sha256_file(path))
+
+    def test_scene_audit_checks_protected_and_untouched_regions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = np.column_stack([np.ones(2400, dtype="float32") * .1, np.ones(2400, dtype="float32") * .2])
+            target = source.copy(); target[100:200, 0] = 0
+            path = persist_audio_atomic(Path(directory) / "scene.wav", target, 24000)
+            failed = audit_scene_stage(path, expected_sample_rate=24000, expected_frames=2400, expected_channels=2, protected_intervals_ok=False, untouched_channels_ok=True)
+            self.assertFalse(failed.passed)
+            self.assertEqual(failed.gates["preserved_intervals"].status, GateStatus.FAIL)
+
+
 class V2MountDeployTests(unittest.TestCase):
     def test_mount_preserves_channels_and_effort(self):
         stem = np.zeros((24000, 2), dtype="float32"); stem[:2400, 0] = .2; stem[:, 1] = .07; stem[12000:13000, 0] = .15
@@ -123,6 +163,8 @@ class V2SchedulerTests(unittest.TestCase):
         def evaluate(item): order.append(("qa", item)); return Result()
         report = run_cohorts(items, item_id=lambda value: value, generate=generate, evaluate=evaluate, telemetry=telemetry)
         self.assertEqual(order[0][0], "generate"); self.assertEqual(order[1][0], "qa"); self.assertEqual(report.retry_ids, [])
+        self.assertNotIn("RUNTIME_SMOKE", report.phases)
+        self.assertNotIn("MOUNT_SCENES", report.phases)
 
     def test_fmv_scene_uses_surgical_mount(self):
         import soundfile as sf
@@ -140,6 +182,32 @@ class V2SchedulerTests(unittest.TestCase):
             line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
             report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR())
             self.assertTrue(report["pass"]); self.assertTrue(Path(report["mounted_output"]).is_file())
+
+    def test_final_selection_happens_after_processed_and_mounted_qa(self):
+        import soundfile as sf
+
+        class Backend:
+            def generate_batch(self, payload):
+                long_audio = np.zeros(48000, dtype="float32"); long_audio[100:47000] = .05
+                short_audio = np.zeros(2400, dtype="float32"); short_audio[100:1100] = .05
+                return [long_audio, short_audio][:len(payload)]
+
+        class ASR:
+            def transcribe(self, _path): return {"text": "Hallo", "language": "de", "probability": .99}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); ref = root / "ref.wav"; stem = root / "stem.wav"
+            sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
+            original = np.column_stack([np.ones(24000, dtype="float32") * .02, np.ones(24000, dtype="float32") * .07]); sf.write(stem, original, 24000)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", fmv_initial_takes=2, fmv_retry_takes=0, seed=11)
+            line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
+            report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR())
+            self.assertTrue(report["pass"])
+            self.assertEqual(report["lines"][0]["candidate_id"], "L1:r1:t2")
+            self.assertEqual(report["lines"][0]["status"], "FINAL_PASS")
+            self.assertTrue(report["scene_qa"]["passed"])
+            self.assertEqual(report["stage_evidence"]["SCENE_QA"]["status"], "EXECUTED")
+            self.assertTrue(Path(report["mounted_output"]).is_file())
 
 
 if __name__ == "__main__":
