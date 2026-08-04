@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "goldset-v1",
+  "type": "object",
+  "required": ["clip_id", "audio_sha256", "scene_id", "line_id", "candidate_id", "expected_text", "split_group", "split"],
+  "properties": {
+    "clip_id": {"type": "string", "minLength": 1},
+    "audio_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "scene_id": {"type": "string", "minLength": 1},
+    "line_id": {"type": "string", "minLength": 1},
+    "candidate_id": {"type": "string", "minLength": 1},
+    "expected_text": {"type": "string", "minLength": 1},
+    "split_group": {"type": "string", "minLength": 1},
+    "split": {"enum": ["calibration", "validation", "hidden_test"]}
+  },
+  "additionalProperties": true
+}
