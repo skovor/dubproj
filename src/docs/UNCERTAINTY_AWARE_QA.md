@@ -100,11 +100,29 @@ speech-tail gap, and one of `FINAL_ANCHOR_EVIDENCE_COLLECTED`,
 `FINAL_ANCHOR_UNALIGNED`, `FINAL_ANCHOR_WEAK`, or
 `FINAL_ANCHOR_INTERPOLATED`.
 
+Expected and observed characters use the same `alignment-text-normalization-v1`
+policy (NFC, casefold, canonical apostrophe, whitespace/punctuation handling).
+The mapping is a deterministic Levenshtein backtrace with `MATCH`,
+`SUBSTITUTE`, `DELETE`, `INSERT`, and `INTERPOLATED` operations; coverage,
+operation counts, operation hash, and final-anchor fields are derived from the
+backtrace rather than positional rows.
+
 All of these fields are `DIAGNOSTIC_ONLY`. The character adapter does not
 emit a boolean `final_anchor_present` authority signal. A validated profile
-using `feature_schema_version = char-alignment-v1` may use the collected,
-non-interpolated final anchor only after its calibrated minimum score
-threshold is met.
+using `feature_schema_version = char-alignment-v2` may use the collected,
+non-interpolated final anchor only after its calibrated final-anchor
+probability threshold is met.
+
+The raw CTC score is stored separately from `calibrated_target_probability` and
+`calibrated_final_anchor_probability`. A hard verdict cannot be emitted when
+either probability is absent; an unreadable or unsupported calibrator is a
+deterministic calibration block with no TTS retry.
+
+The `char-alignment-v2` feature order is fixed and includes target score,
+character coverage/score quantiles, delete/substitute/insert/interpolation
+ratios, compression, characters-per-second, words-per-second, duration in
+seconds, and an explicit performance-mode code. Its hash is recorded with the
+decision and the calibrator artifact SHA.
 
 The line report is candidate-aware (`candidate_linguistic_decisions`,
 `line_linguistic_summary`, and `selected_candidate_linguistic_decision`).  An

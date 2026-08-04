@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dubbing_pipeline.alignment import AlignmentCache, contrastive_align
+from dubbing_pipeline.alignment import AlignmentCache, AlignmentTextPolicy, _character_evidence, contrastive_align, normalize_alignment_text
 from dubbing_pipeline.alignment import _extract_mfa_words
 from dubbing_pipeline.contracts import ContractError, DeliveryWindow, EvidenceFamily, GateStatus, ReferenceEvidence
 from dubbing_pipeline.contracts.manifest import validate_manifest_value
@@ -18,7 +18,7 @@ from dubbing_pipeline.hashing import atomic_json, contract_hash, sha256_file
 from dubbing_pipeline.models import Line
 from dubbing_pipeline.montage import mount_surgical
 from dubbing_pipeline.asr import ASRCache, prepare_whisperx_escalation, transcribe_dual
-from dubbing_pipeline.qa_v2 import LanguageProfile, apply_independent_evidence, decide_linguistic_evidence, evaluate_candidate_v2, final_word, ordered_content, source_language_leak
+from dubbing_pipeline.qa_v2 import LanguageProfile, apply_independent_evidence, decide_linguistic_evidence, evaluate_candidate_v2, final_word, load_safe_calibrator, ordered_content, predict_probability, source_language_leak
 from dubbing_pipeline.scheduler import run_cohorts
 from dubbing_pipeline.telemetry import TelemetryCollector
 from dubbing_pipeline.config import PipelineConfig, QAConfig
@@ -32,10 +32,17 @@ from dubbing_pipeline.reference import materialize_reference
 
 
 def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dict, Path, Path]:
-    artifact = root / "target_calibrator.bin"
+    artifact = root / "target_calibrator.json"
     runtime_lock = root / "runtime.lock"
     models_lock = root / "models.lock"
-    artifact.write_bytes(b"validated-calibrator")
+    artifact.write_text(json.dumps({
+        "schema": "platt-calibrator-v1",
+        "feature_schema_version": "char-alignment-v2",
+        "normalization_version": "alignment-text-normalization-v1",
+        "features": ["target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score", "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio", "characters_per_second", "words_per_second", "duration", "performance_mode"],
+        "coefficients": [1.2, .8, .7, .7, .4, -1.0, -1.0, -1.0, -1.0, -.3, 0.0, 0.0, 0.0, 0.0],
+        "intercept": -1.1,
+    }), encoding="utf-8")
     runtime_lock.write_bytes(b"runtime-lock-for-test")
     models_lock.write_bytes(b"models-lock-for-test")
     profile = {
@@ -47,7 +54,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "backend_id": "fake-ctc",
             "model_id": "fake-german",
             "model_revision": model_revision,
-            "feature_schema_version": "char-alignment-v1",
+            "feature_schema_version": "char-alignment-v2",
             "target_language": "de",
             "source_language": "en",
             "performance_modes": ["NEUTRAL"],
@@ -58,7 +65,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "final_anchor_pass_probability": .65,
             "source_lid_probability": .70,
         },
-        "calibrator": {"type": "platt", "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
+        "calibrator": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v1", "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
         "dataset": {
             "manifest_sha256": "a" * 64,
             "labels_sha256": "b" * 64,
@@ -312,9 +319,11 @@ class V2QATests(unittest.TestCase):
                 "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
                 automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
             )
+            target_chars = [{"char": char, "start": index * .02, "end": (index + 1) * .02, "score": .9} for index, char in enumerate("KeineSorge")]
+            target_metrics = _character_evidence("Keine Sorge", {"char_segments": target_chars}, [])
             decision = apply_independent_evidence(
                 base,
-                {"target_score": .95, "source_score": .10, "target": {"final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+                {"target_score": .95, "source_score": .10, "target": {**target_metrics, "char_segments": target_chars}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
                 calibration_authority=True, calibration_profile=profile, calibration_profile_root=root,
                 backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
                 runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
@@ -322,6 +331,95 @@ class V2QATests(unittest.TestCase):
             self.assertEqual(decision.status, "PASS_CONFIRMED")
             self.assertTrue(decision.confirmed)
             self.assertEqual(decision.calibration_profile_status, "MATCHED_VALIDATED")
+            self.assertIsNotNone(decision.calibrated_target_probability)
+            self.assertIsNotNone(decision.calibrated_final_anchor_probability)
+            self.assertNotEqual(decision.raw_target_score, decision.calibrated_target_probability)
+
+    def test_inert_calibrator_cannot_grant_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, runtime_lock, models_lock = _validated_profile(root)
+            profile["calibrator"]["engine"] = "external-python"
+            base = decide_linguistic_evidence(
+                "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+                automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+            )
+            target_chars = [{"char": char, "start": index * .02, "end": (index + 1) * .02, "score": .9} for index, char in enumerate("KeineSorge")]
+            target_metrics = _character_evidence("Keine Sorge", {"char_segments": target_chars}, [])
+            decision = apply_independent_evidence(
+                base,
+                {"target_score": .99, "target": {**target_metrics, "char_segments": target_chars}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+                calibration_authority=True, calibration_profile=profile, calibration_profile_root=root,
+                backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+                runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
+            )
+            self.assertEqual(decision.status, "BLOCKED")
+            self.assertEqual(decision.calibration_profile_status, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE")
+            self.assertIsNone(decision.calibrated_target_probability)
+
+    def test_safe_calibrator_import_and_probability_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, _runtime_lock, _models_lock = _validated_profile(root)
+            artifact = load_safe_calibrator(
+                root / "target_calibrator.json",
+                profile["calibrator"]["artifact_sha256"],
+                "char-alignment-v2",
+            )
+            vector = {name: 0.0 for name in artifact["features"]}
+            self.assertGreaterEqual(predict_probability(artifact, vector), 0.0)
+            self.assertLessEqual(predict_probability(artifact, vector), 1.0)
+            with self.assertRaises(ValueError):
+                predict_probability(artifact, {"target_score": 0.99})
+            broken = dict(artifact)
+            broken["coefficients"] = [float("nan")] + list(artifact["coefficients"])[1:]
+            with self.assertRaises(ValueError):
+                predict_probability(broken, vector)
+
+    def test_alignment_normalization_is_versioned_and_shared(self):
+        self.assertEqual(normalize_alignment_text("geht\u2019s"), normalize_alignment_text("geht's"))
+        self.assertEqual(normalize_alignment_text("F\u00fcr n\u00e4chste!"), normalize_alignment_text("F\u00fcrn\u00e4chste"))
+        self.assertEqual(AlignmentTextPolicy().version, "alignment-text-normalization-v1")
+
+    def test_sequence_character_alignment_preserves_insertions_deletions_and_apostrophes(self):
+        def rows(value: str):
+            return [{"char": char, "start": index * .02, "end": (index + 1) * .02, "score": .9} for index, char in enumerate(value)]
+
+        apostrophe = _character_evidence("geht's", {"char_segments": rows("geht's")}, [])
+        self.assertEqual(apostrophe["native_char_coverage"], 1.0)
+        self.assertEqual(apostrophe["final_anchor_evidence"]["status"], "FINAL_ANCHOR_EVIDENCE_COLLECTED")
+        self.assertNotIn("'", apostrophe["unaligned_characters"])
+
+        umlaut = _character_evidence("Für nächste!", {"char_segments": rows("Fürnächste!")}, [])
+        self.assertEqual(umlaut["native_char_coverage"], 1.0)
+        self.assertEqual(umlaut["final_anchor_evidence"]["status"], "FINAL_ANCHOR_EVIDENCE_COLLECTED")
+        self.assertIn("ü", [row["expected_char"] for row in umlaut["char_segments"]])
+        self.assertIn("ä", [row["expected_char"] for row in umlaut["char_segments"]])
+
+        deleted = _character_evidence("Sorge", {"char_segments": rows("Soge")}, [])
+        expected_rows = [row for row in deleted["char_segments"] if row.get("expected_index") is not None]
+        self.assertEqual(next(row for row in expected_rows if row["expected_char"] == "r")["operation"], "DELETE")
+        self.assertEqual([row["operation"] for row in expected_rows if row["expected_char"] in {"g", "e"}], ["MATCH", "MATCH"])
+
+        inserted = _character_evidence("Sorge", {"char_segments": rows("Sorxge")}, [])
+        self.assertTrue(any(row.get("operation") == "INSERT" and row.get("observed_char") == "x" for row in inserted["char_segments"]))
+        expected_rows = [row for row in inserted["char_segments"] if row.get("expected_index") is not None]
+        self.assertEqual([row["operation"] for row in expected_rows if row["expected_char"] in {"g", "e"}], ["MATCH", "MATCH"])
+        self.assertEqual(inserted["final_anchor_evidence"]["status"], "FINAL_ANCHOR_EVIDENCE_COLLECTED")
+
+        interpolated_rows = rows("Sorge")
+        interpolated_rows[2]["interpolated"] = True
+        interpolated = _character_evidence("Sorge", {"char_segments": interpolated_rows}, [])
+        self.assertEqual(interpolated["char_segments"][2]["operation"], "INTERPOLATED")
+        self.assertEqual(interpolated["interpolated_count"], 1)
+        self.assertTrue(interpolated["alignment_operation_hash"])
+
+        punctuation = _character_evidence("Komm zurück...", {"char_segments": rows("Komm zurück")}, [])
+        self.assertEqual(punctuation["native_char_coverage"], 1.0)
+        self.assertEqual(punctuation["final_anchor_evidence"]["status"], "FINAL_ANCHOR_EVIDENCE_COLLECTED")
+        cutoff = _character_evidence("Komm zurück", {"char_segments": rows("Komm zurü")}, [])
+        self.assertNotEqual(cutoff["final_anchor_evidence"]["status"], "FINAL_ANCHOR_EVIDENCE_COLLECTED")
+        self.assertLess(cutoff["final_anchor_evidence"]["coverage"], 1.0)
 
     def test_minimal_profile_cannot_grant_authority(self):
         base = decide_linguistic_evidence(
@@ -380,10 +478,11 @@ class V2QATests(unittest.TestCase):
                 "automatic": {"text": "Don't worry", "language": "en", "probability": .99},
             }
             chars = [{"char": char, "start": index * .02, "end": (index + 1) * .02, "score": .9} for index, char in enumerate(char for char in "Keine Sorge" if not char.isspace())]
+            char_metrics = _character_evidence("Keine Sorge", {"char_segments": chars}, [])
             result = evaluate_candidate_v2(
                 str(path), expected_text="Keine Sorge", source_text="Don't worry", target_sample_rate=24000, target_frames=2400,
                 linguistic_evidence=evidence,
-                alignment_evidence={"target_score": .95, "source_score": .10, "target": {"char_segments": chars}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+                alignment_evidence={"target_score": .95, "source_score": .10, "target": {**char_metrics, "char_segments": chars}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
                 calibration_authority=True, calibration_profile=profile, calibration_profile_root=root,
                 backend_id="fake-ctc", model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
                 runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),

@@ -106,7 +106,7 @@ def audit_candidate_stage(
     calibration_authority: bool = False,
     calibration_profile: Mapping[str, Any] | None = None,
     calibration_profile_root: str | Path | None = None,
-    feature_schema_version: str = "char-alignment-v1",
+    feature_schema_version: str = "char-alignment-v2",
     backend_id: str | None = None,
     runtime_lock_sha256: str | None = None,
     models_lock_sha256: str | None = None,

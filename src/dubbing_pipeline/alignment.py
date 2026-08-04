@@ -24,6 +24,34 @@ class AlignmentUnavailable(RuntimeError):
     """Raised when an optional alignment family is not installed/configured."""
 
 
+@dataclass(frozen=True)
+class AlignmentTextPolicy:
+    """Versioned text normalization shared by expected and observed streams."""
+
+    version: str = "alignment-text-normalization-v1"
+    keep_apostrophe: bool = True
+    ignore_punctuation: bool = True
+
+
+DEFAULT_ALIGNMENT_TEXT_POLICY = AlignmentTextPolicy()
+
+
+def normalize_alignment_text(text: str, policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_TEXT_POLICY) -> list[str]:
+    """Normalize both sides of an alignment with one deterministic policy."""
+    normal = unicodedata.normalize("NFC", str(text or "")).replace("\u2019", "'")
+    result: list[str] = []
+    for char in normal:
+        if char.isspace():
+            continue
+        if char.isalnum():
+            result.append(char.casefold())
+        elif char == "'" and policy.keep_apostrophe:
+            result.append("'")
+        elif not policy.ignore_punctuation:
+            result.append(char.casefold())
+    return result
+
+
 def _fold_word(value: Any) -> str:
     """Compare aligned words without punctuation/diacritic differences."""
     normal = unicodedata.normalize("NFKD", str(value or "").casefold())
@@ -57,6 +85,8 @@ class AlignmentCache:
     backend_id: str = "unknown"
     model_id: str = "unknown"
     model_revision: str = "unknown"
+    feature_schema_version: str = "char-alignment-v2"
+    normalization_version: str = "alignment-text-normalization-v1"
 
     def _key(self, audio_sha256: str, text: str, language: str) -> str:
         return sha256_bytes(canonical_json({
@@ -66,6 +96,8 @@ class AlignmentCache:
             "backend_id": self.backend_id,
             "model_id": self.model_id,
             "model_revision": self.model_revision,
+            "feature_schema_version": self.feature_schema_version,
+            "normalization_version": self.normalization_version,
         }))
 
     def _path(self, key: str) -> Path | None:
@@ -104,7 +136,16 @@ class AlignmentReading:
     p10_char_score: float | None = None
     unaligned_characters: list[str] = field(default_factory=list)
     interpolated_characters: list[str] = field(default_factory=list)
+    delete_count: int = 0
+    insert_count: int = 0
+    substitute_count: int = 0
+    interpolated_count: int = 0
+    alignment_operation_hash: str | None = None
     compression_ratio: float | None = None
+    duration: float | None = None
+    characters_per_second: float | None = None
+    words_per_second: float | None = None
+    normalization_version: str = "alignment-text-normalization-v1"
     final_anchor_evidence: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -122,7 +163,16 @@ class AlignmentReading:
             "p10_char_score": self.p10_char_score,
             "unaligned_characters": list(self.unaligned_characters or []),
             "interpolated_characters": list(self.interpolated_characters or []),
+            "delete_count": self.delete_count,
+            "insert_count": self.insert_count,
+            "substitute_count": self.substitute_count,
+            "interpolated_count": self.interpolated_count,
+            "alignment_operation_hash": self.alignment_operation_hash,
             "compression_ratio": self.compression_ratio,
+            "duration": self.duration,
+            "characters_per_second": self.characters_per_second,
+            "words_per_second": self.words_per_second,
+            "normalization_version": self.normalization_version,
             "final_anchor_evidence": dict(self.final_anchor_evidence) if self.final_anchor_evidence is not None else None,
             "record": self.record.to_dict(),
             "cache_hit": self.cache_hit,
@@ -201,76 +251,200 @@ def _raw_char_segments(value: Mapping[str, Any], words: list[dict[str, Any]]) ->
     return rows
 
 
-def _character_evidence(text: str, value: Mapping[str, Any], words: list[dict[str, Any]]) -> dict[str, Any]:
-    """Normalize WhisperX/MFA character output into diagnostic-only metrics."""
-    expected = [char for char in str(text or "") if not char.isspace() and (char.isalnum() or char in "'’")]
-    raw_rows = _raw_char_segments(value, words)
+_APOSTROPHE = "'"
+_TOKEN_WITH_APOSTROPHE = re.compile(r"[^\W\d_]+(?:['\u2019][^\W\d_]+)*", re.UNICODE)
+
+
+def _normalise_char(value: Any, policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_TEXT_POLICY) -> tuple[str, str] | None:
+    """Apply one NFC/case/punctuation policy to expected and observed text."""
+    normal = unicodedata.normalize("NFC", str(value or "")).replace("\u2019", _APOSTROPHE)
+    if len(normal) != 1:
+        return None
+    char = normal[0]
+    if not (char.isalnum() or (char == _APOSTROPHE and policy.keep_apostrophe)) and policy.ignore_punctuation:
+        return None
+    return char, char.casefold()
+
+
+def _expected_characters(text: str, policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_TEXT_POLICY) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_rows):
-        char = str(raw.get("char", raw.get("text", raw.get("label", ""))) or "")
-        if not char or char.isspace() or not any(item.isalnum() for item in char):
+    normal = unicodedata.normalize("NFC", str(text or "")).replace("\u2019", _APOSTROPHE)
+    for source_index, char in enumerate(normal):
+        item = _normalise_char(char, policy)
+        if item is None:
             continue
-        start = raw.get("start")
-        end = raw.get("end")
-        try:
-            start_value = float(start) if start is not None else None
-            end_value = float(end) if end is not None else None
-        except (TypeError, ValueError):
-            start_value, end_value = None, None
-        score_value = raw.get("score", raw.get("confidence", raw.get("probability")))
-        try:
-            score = max(0.0, min(1.0, float(score_value))) if score_value is not None else None
-        except (TypeError, ValueError):
-            score = None
-        rows.append({
-            "char": char,
-            "start": start_value,
-            "end": end_value,
-            "score": score,
-            "aligned": start_value is not None and end_value is not None,
-            "interpolated": bool(raw.get("interpolated", raw.get("is_interpolated", False))),
-            "index": index,
-        })
-    aligned_count = 0
-    unaligned: list[str] = []
-    interpolated: list[str] = []
-    normalized_rows: list[dict[str, Any]] = []
-    for index, char in enumerate(expected):
-        row = rows[index] if index < len(rows) else {"char": "", "start": None, "end": None, "score": None, "aligned": False, "interpolated": False}
-        row = dict(row)
-        row["expected_char"] = char
-        if row.get("aligned"):
-            aligned_count += 1
+        display, key = item
+        rows.append({"expected_char": display, "normalized_char": key, "expected_index": len(rows), "source_index": source_index})
+    return rows
+
+
+def _observed_characters(raw_rows: list[dict[str, Any]], policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_TEXT_POLICY) -> list[dict[str, Any]]:
+    """Flatten native char rows while retaining timing/score provenance."""
+    rows: list[dict[str, Any]] = []
+    for raw_index, raw in enumerate(raw_rows):
+        raw_text = unicodedata.normalize("NFC", str(raw.get("char", raw.get("text", raw.get("label", ""))) or "")).replace("\u2019", _APOSTROPHE)
+        for char in raw_text:
+            item = _normalise_char(char, policy)
+            if item is None:
+                continue
+            display, key = item
+            start = raw.get("start")
+            end = raw.get("end")
+            try:
+                start_value = float(start) if start is not None else None
+                end_value = float(end) if end is not None else None
+            except (TypeError, ValueError):
+                start_value, end_value = None, None
+            score_value = raw.get("score", raw.get("confidence", raw.get("probability")))
+            try:
+                score = max(0.0, min(1.0, float(score_value))) if score_value is not None else None
+            except (TypeError, ValueError):
+                score = None
+            rows.append({
+                "char": display,
+                "normalized_char": key,
+                "start": start_value,
+                "end": end_value,
+                "score": score,
+                "interpolated": bool(raw.get("interpolated", raw.get("is_interpolated", False))),
+                "raw_index": raw_index,
+                "observed_index": len(rows),
+            })
+    return rows
+
+
+def _sequence_align(expected: list[dict[str, Any]], observed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Levenshtein backtrace with explicit MATCH/SUBSTITUTE/DELETE/INSERT rows."""
+    n, m = len(expected), len(observed)
+    costs = [[0.0] * (m + 1) for _ in range(n + 1)]
+    operations: list[list[str | None]] = [[None] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        costs[i][0] = float(i)
+        operations[i][0] = "DELETE"
+    for j in range(1, m + 1):
+        costs[0][j] = float(j)
+        operations[0][j] = "INSERT"
+    # A substitution costs more than a gap pair, so an omitted/extra phoneme
+    # is represented explicitly instead of shifting every following character.
+    priorities = {"MATCH": 0, "DELETE": 1, "INSERT": 2, "SUBSTITUTE": 3}
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            same = expected[i - 1]["normalized_char"] == observed[j - 1]["normalized_char"]
+            diagonal_operation = "MATCH" if same else "SUBSTITUTE"
+            candidates = [
+                (costs[i - 1][j - 1] + (0.0 if same else 2.0), priorities[diagonal_operation], diagonal_operation),
+                (costs[i - 1][j] + 1.0, priorities["DELETE"], "DELETE"),
+                (costs[i][j - 1] + 1.0, priorities["INSERT"], "INSERT"),
+            ]
+            costs[i][j], _priority, operations[i][j] = min(candidates, key=lambda item: (item[0], item[1]))
+    rows: list[dict[str, Any]] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        operation = operations[i][j]
+        if operation in {"MATCH", "SUBSTITUTE"}:
+            expected_row = expected[i - 1]
+            observed_row = observed[j - 1]
+            row = dict(observed_row)
+            row.update({
+                "expected_char": expected_row["expected_char"],
+                "expected_index": expected_row["expected_index"],
+                "operation": "INTERPOLATED" if operation == "MATCH" and observed_row.get("interpolated") else operation,
+                "observed_char": observed_row["char"],
+                "timing_valid": bool(observed_row.get("start") is not None and observed_row.get("end") is not None and observed_row["end"] > observed_row["start"]),
+            })
+            row["aligned"] = operation == "MATCH" and row["timing_valid"] and not row.get("interpolated")
+            rows.append(row)
+            i -= 1; j -= 1
+        elif operation == "DELETE":
+            expected_row = expected[i - 1]
+            rows.append({
+                "char": "", "normalized_char": "", "observed_char": None,
+                "expected_char": expected_row["expected_char"], "expected_index": expected_row["expected_index"],
+                "observed_index": None, "raw_index": None, "start": None, "end": None, "score": None,
+                "interpolated": False, "timing_valid": False, "aligned": False, "operation": "DELETE",
+            })
+            i -= 1
+        elif operation == "INSERT":
+            observed_row = observed[j - 1]
+            row = dict(observed_row)
+            row.update({
+                "expected_char": None, "expected_index": None, "observed_char": observed_row["char"],
+                "timing_valid": bool(observed_row.get("start") is not None and observed_row.get("end") is not None and observed_row["end"] > observed_row["start"]),
+                "aligned": False, "operation": "INSERT",
+            })
+            rows.append(row)
+            j -= 1
         else:
-            unaligned.append(char)
-        if row.get("interpolated"):
-            interpolated.append(char)
-        normalized_rows.append(row)
-    scores = [float(row["score"]) for row in normalized_rows if row.get("score") is not None]
-    scores.sort()
+            raise ValueError("character alignment backtrace reached an invalid state")
+    rows.reverse()
+    return rows
+
+
+
+
+def _character_evidence(text: str, value: Mapping[str, Any], words: list[dict[str, Any]], policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_TEXT_POLICY) -> dict[str, Any]:
+    """Return sequence-aligned, diagnostic-only character evidence."""
+    expected = _expected_characters(text, policy)
+    observed = _observed_characters(_raw_char_segments(value, words), policy)
+    normalized_rows = _sequence_align(expected, observed)
+    expected_rows = [row for row in normalized_rows if row.get("expected_index") is not None]
+    aligned_count = sum(1 for row in expected_rows if row.get("aligned"))
+    unaligned = [str(row.get("expected_char", "")) for row in expected_rows if not row.get("aligned")]
+    interpolated = [str(row.get("expected_char", "")) for row in expected_rows if row.get("interpolated")]
+    delete_count = sum(1 for row in normalized_rows if row.get("operation") == "DELETE")
+    insert_count = sum(1 for row in normalized_rows if row.get("operation") == "INSERT")
+    substitute_count = sum(1 for row in normalized_rows if row.get("operation") == "SUBSTITUTE")
+    interpolated_count = sum(1 for row in normalized_rows if row.get("operation") == "INTERPOLATED")
+    operation_payload = [
+        {key: row.get(key) for key in ("expected_index", "expected_char", "observed_index", "observed_char", "operation")}
+        for row in normalized_rows
+    ]
+    alignment_operation_hash = sha256_bytes(canonical_json({"schema": "character-sequence-alignment-v1", "operations": operation_payload}))
+    scores = sorted(float(row["score"]) for row in expected_rows if row.get("score") is not None)
     coverage = (aligned_count / len(expected)) if expected else 0.0
     p10 = scores[max(0, min(len(scores) - 1, int(round((len(scores) - 1) * .10))))] if scores else None
-    final_token_match = re.findall(r"[^\W\d_]+", str(text or ""), flags=re.UNICODE)
-    final_chars = [char for char in (final_token_match[-1] if final_token_match else "") if not char.isspace()]
-    final_rows = normalized_rows[-len(final_chars):] if final_chars else []
+    token_matches = list(_TOKEN_WITH_APOSTROPHE.finditer(unicodedata.normalize("NFC", str(text or ""))))
+    final_token = token_matches[-1].group(0) if token_matches else ""
+    final_token_chars = _expected_characters(final_token, policy)
+    final_start_index = len(expected) - len(final_token_chars) if final_token_chars else len(expected)
+    final_rows = [row for row in expected_rows if int(row.get("expected_index", -1)) >= final_start_index]
     final_aligned = [row for row in final_rows if row.get("aligned")]
     final_scores = [float(row["score"]) for row in final_rows if row.get("score") is not None]
-    final_start = min((row["start"] for row in final_aligned), default=None)
-    final_end = max((row["end"] for row in final_aligned), default=None)
+    final_start = min((row["start"] for row in final_aligned if row.get("start") is not None), default=None)
+    final_end = max((row["end"] for row in final_aligned if row.get("end") is not None), default=None)
     active_end = max((float(row["end"]) for row in normalized_rows if row.get("end") is not None), default=None)
-    final_coverage = (len(final_aligned) / len(final_chars)) if final_chars else 0.0
+    active_start = min((float(row["start"]) for row in normalized_rows if row.get("start") is not None), default=None)
+    duration_seconds = (active_end - active_start) if active_start is not None and active_end is not None and active_end > active_start else None
+    token_count = len(_TOKEN_WITH_APOSTROPHE.findall(unicodedata.normalize("NFC", str(text or ""))))
+    words_with_timing = sum(1 for row in words if row.get("start") is not None and row.get("end") is not None)
+    word_count = words_with_timing or token_count
+    final_coverage = (len(final_aligned) / len(final_token_chars)) if final_token_chars else 0.0
     final_interpolated = any(bool(row.get("interpolated")) for row in final_rows)
+    final_operations = [str(row.get("operation")) for row in final_rows]
+    final_invalid_timing = any(not row.get("timing_valid") for row in final_rows)
+    final_observed_indices = [int(row["observed_index"]) for row in final_rows if row.get("observed_index") is not None]
+    final_insertions_inside_anchor = 0
+    if final_observed_indices:
+        first_observed, last_observed = min(final_observed_indices), max(final_observed_indices)
+        final_insertions_inside_anchor = sum(
+            1 for row in normalized_rows
+            if row.get("operation") == "INSERT" and row.get("observed_index") is not None and first_observed <= int(row["observed_index"]) <= last_observed
+        )
     if not final_rows or final_coverage <= 0.0:
         final_status = "FINAL_ANCHOR_UNALIGNED"
     elif final_interpolated:
         final_status = "FINAL_ANCHOR_INTERPOLATED"
-    elif final_coverage < 1.0 or not final_scores or min(final_scores) < .5:
+    elif any(operation in {"DELETE", "SUBSTITUTE"} for operation in final_operations) or final_invalid_timing or final_coverage < 1.0 or not final_scores or min(final_scores) < .5:
         final_status = "FINAL_ANCHOR_WEAK"
     else:
         final_status = "FINAL_ANCHOR_EVIDENCE_COLLECTED"
     final_evidence = {
-        "token": final_token_match[-1] if final_token_match else "",
-        "expected_characters": len(final_chars),
+        "token": final_token,
+        "expected_characters": len(final_token_chars),
+        "matched_characters": sum(1 for row in final_rows if row.get("operation") == "MATCH" and row.get("aligned")),
+        "substituted_characters": sum(1 for row in final_rows if row.get("operation") == "SUBSTITUTE"),
+        "deleted_characters": sum(1 for row in final_rows if row.get("operation") == "DELETE"),
+        "insertions_inside_anchor": final_insertions_inside_anchor,
         "aligned_characters": len(final_aligned),
         "coverage": final_coverage,
         "start": final_start,
@@ -279,6 +453,10 @@ def _character_evidence(text: str, value: Mapping[str, Any], words: list[dict[st
         "mean_score": (sum(final_scores) / len(final_scores)) if final_scores else None,
         "minimum_score": min(final_scores) if final_scores else None,
         "interpolated": final_interpolated,
+        "operations": final_operations,
+        "alignment_operation_hash": alignment_operation_hash,
+        "normalization_version": policy.version,
+        "timing_valid": not final_invalid_timing,
         "gap_to_active_speech_end_ms": ((active_end - final_end) * 1000.0) if active_end is not None and final_end is not None else None,
         "status": final_status,
         "authority": "DIAGNOSTIC_ONLY",
@@ -291,7 +469,16 @@ def _character_evidence(text: str, value: Mapping[str, Any], words: list[dict[st
         "p10_char_score": p10,
         "unaligned_characters": unaligned,
         "interpolated_characters": interpolated,
-        "compression_ratio": (len(rows) / len(expected)) if expected else 0.0,
+        "delete_count": delete_count,
+        "insert_count": insert_count,
+        "substitute_count": substitute_count,
+        "interpolated_count": interpolated_count,
+        "alignment_operation_hash": alignment_operation_hash,
+        "duration": duration_seconds,
+        "characters_per_second": (len(observed) / duration_seconds) if duration_seconds and duration_seconds > 0 else None,
+        "words_per_second": (word_count / duration_seconds) if duration_seconds and duration_seconds > 0 else None,
+        "normalization_version": policy.version,
+        "compression_ratio": (len(observed) / len(expected)) if expected else 0.0,
         "final_anchor_evidence": final_evidence,
     }
 

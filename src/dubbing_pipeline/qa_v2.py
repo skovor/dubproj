@@ -1,6 +1,8 @@
 """Measured QA gates and fail-closed candidate selection."""
 from __future__ import annotations
 
+import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -9,11 +11,42 @@ from typing import Any, Literal, Mapping, Sequence
 
 from .audio import clipping, peak_dbfs, read
 from .contracts import FailureClass, GateEvidence, GateStatus, gate_passes
-from .hashing import sha256_file
+from .hashing import canonical_json, sha256_bytes, sha256_file
 from .timing import speech_end
 
 _TOKEN = re.compile(r"[^\W\d_]+", re.UNICODE)
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+_CALIBRATOR_SCHEMA = "platt-calibrator-v1"
+_CALIBRATOR_ENGINE = "builtin"
+_CALIBRATOR_FORMAT = "json"
+_FEATURE_SCHEMA_VERSION = "char-alignment-v2"
+_NORMALIZATION_VERSION = "alignment-text-normalization-v1"
+_CALIBRATOR_FEATURES = (
+    "target_score",
+    "native_char_coverage",
+    "mean_char_score",
+    "minimum_char_score",
+    "p10_char_score",
+    "delete_ratio",
+    "substitute_ratio",
+    "insert_ratio",
+    "interpolated_ratio",
+    "compression_ratio",
+    "characters_per_second",
+    "words_per_second",
+    "duration",
+    "performance_mode",
+)
+_PERFORMANCE_MODE_CODES = {
+    "NEUTRAL": 0.0,
+    "FAST": 1.0,
+    "WHISPER": 2.0,
+    "SHOUT": 3.0,
+    "SCREAM_SPEECH": 4.0,
+    "CRYING_SPEECH": 5.0,
+    "EFFORT": 6.0,
+    "LAUGH_SPEECH": 7.0,
+}
 
 
 def fold(text: str) -> str:
@@ -96,7 +129,16 @@ class LinguisticDecision:
     p10_char_score: float | None = None
     unaligned_characters: list[str] = field(default_factory=list)
     interpolated_characters: list[str] = field(default_factory=list)
+    delete_count: int = 0
+    insert_count: int = 0
+    substitute_count: int = 0
+    interpolated_count: int = 0
+    alignment_operation_hash: str | None = None
     compression_ratio: float | None = None
+    duration: float | None = None
+    characters_per_second: float | None = None
+    words_per_second: float | None = None
+    normalization_version: str = _NORMALIZATION_VERSION
     missing_tokens: list[str] = field(default_factory=list)
     expected_tokens: list[str] = field(default_factory=list)
     forced_final_tokens: list[str] = field(default_factory=list)
@@ -109,6 +151,16 @@ class LinguisticDecision:
     confirmed: bool = False
     calibration_authority: bool = False
     calibration_profile_status: str = "DISABLED"
+    raw_target_score: float | None = None
+    calibrated_target_probability: float | None = None
+    raw_final_anchor_score: float | None = None
+    calibrated_final_anchor_probability: float | None = None
+    feature_vector: dict[str, float] | None = None
+    feature_vector_hash: str | None = None
+    final_anchor_feature_vector: dict[str, float] | None = None
+    final_anchor_feature_vector_hash: str | None = None
+    calibrator_hash: str | None = None
+    calibrator_artifact_sha256: str | None = None
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,7 +185,16 @@ class LinguisticDecision:
             "p10_char_score": self.p10_char_score,
             "unaligned_characters": list(self.unaligned_characters),
             "interpolated_characters": list(self.interpolated_characters),
+            "delete_count": self.delete_count,
+            "insert_count": self.insert_count,
+            "substitute_count": self.substitute_count,
+            "interpolated_count": self.interpolated_count,
+            "alignment_operation_hash": self.alignment_operation_hash,
             "compression_ratio": self.compression_ratio,
+            "duration": self.duration,
+            "characters_per_second": self.characters_per_second,
+            "words_per_second": self.words_per_second,
+            "normalization_version": self.normalization_version,
             "missing_tokens": list(self.missing_tokens),
             "expected_tokens": list(self.expected_tokens),
             "forced_final_tokens": list(self.forced_final_tokens),
@@ -146,6 +207,16 @@ class LinguisticDecision:
             "confirmed": self.confirmed,
             "calibration_authority": self.calibration_authority,
             "calibration_profile_status": self.calibration_profile_status,
+            "raw_target_score": self.raw_target_score,
+            "calibrated_target_probability": self.calibrated_target_probability,
+            "raw_final_anchor_score": self.raw_final_anchor_score,
+            "calibrated_final_anchor_probability": self.calibrated_final_anchor_probability,
+            "feature_vector": dict(self.feature_vector) if self.feature_vector is not None else None,
+            "feature_vector_hash": self.feature_vector_hash,
+            "final_anchor_feature_vector": dict(self.final_anchor_feature_vector) if self.final_anchor_feature_vector is not None else None,
+            "final_anchor_feature_vector_hash": self.final_anchor_feature_vector_hash,
+            "calibrator_hash": self.calibrator_hash,
+            "calibrator_artifact_sha256": self.calibrator_artifact_sha256,
             "reason": self.reason,
         }
 
@@ -280,6 +351,209 @@ def decide_linguistic_evidence(
     )
 
 
+def _resolve_calibrator_path(
+    calibrator: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    calibrator_root: str | Path | None,
+) -> Path | None:
+    """Resolve a profile artifact without allowing an implicit CWD fallback."""
+    raw_path = str(calibrator.get("artifact_path", "")).strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    root_value = calibrator_root or profile.get("profile_root")
+    if root_value in (None, ""):
+        return None
+    return Path(root_value) / path
+
+
+def load_safe_calibrator(path: str | Path, expected_sha256: str, expected_feature_schema: str = _FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
+    """Load the only production calibration format: deterministic JSON."""
+    artifact_path = Path(path)
+    expected_hash = str(expected_sha256 or "").casefold()
+    if not artifact_path.is_file() or not _SHA256.fullmatch(expected_hash) or sha256_file(artifact_path).casefold() != expected_hash:
+        raise ValueError("calibrator artifact is missing or has a mismatched SHA-256")
+    try:
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("calibrator artifact is not valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("calibrator artifact must contain a JSON object")
+    if payload.get("schema") != _CALIBRATOR_SCHEMA or payload.get("feature_schema_version") != expected_feature_schema or payload.get("normalization_version") != _NORMALIZATION_VERSION:
+        raise ValueError("calibrator schema or normalization version is incompatible")
+    if list(payload.get("features") or ()) != list(_CALIBRATOR_FEATURES):
+        raise ValueError("calibrator feature order is incompatible")
+    coefficients = payload.get("coefficients")
+    if not isinstance(coefficients, list) or len(coefficients) != len(_CALIBRATOR_FEATURES):
+        raise ValueError("calibrator coefficient length is incompatible")
+    try:
+        intercept = float(payload["intercept"])
+        values = [float(value) for value in coefficients]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("calibrator coefficients are not numeric") from exc
+    if not math.isfinite(intercept) or any(not math.isfinite(value) for value in values):
+        raise ValueError("calibrator coefficients must be finite")
+    return {
+        "schema": _CALIBRATOR_SCHEMA,
+        "feature_schema_version": expected_feature_schema,
+        "normalization_version": _NORMALIZATION_VERSION,
+        "features": list(_CALIBRATOR_FEATURES),
+        "coefficients": values,
+        "intercept": intercept,
+    }
+
+
+def predict_probability(calibrator: Mapping[str, Any], feature_vector: Mapping[str, Any]) -> float:
+    """Evaluate a safe Platt calibrator; never coerce missing data to a score."""
+    if (
+        calibrator.get("schema") != _CALIBRATOR_SCHEMA
+        or calibrator.get("feature_schema_version") != _FEATURE_SCHEMA_VERSION
+        or calibrator.get("normalization_version") != _NORMALIZATION_VERSION
+        or list(calibrator.get("features") or ()) != list(_CALIBRATOR_FEATURES)
+    ):
+        raise ValueError("unsupported calibrator schema")
+    try:
+        logit = float(calibrator["intercept"])
+        for name, coefficient in zip(_CALIBRATOR_FEATURES, calibrator["coefficients"]):
+            value = float(feature_vector[name])
+            coefficient_value = float(coefficient)
+            if not math.isfinite(value) or not math.isfinite(coefficient_value):
+                raise ValueError("calibration features and coefficients must be finite")
+            logit += coefficient_value * value
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("calibration feature vector is incomplete or invalid") from exc
+    if not math.isfinite(logit):
+        raise ValueError("calibrated logit is not finite")
+    if logit >= 0.0:
+        probability = 1.0 / (1.0 + math.exp(-logit))
+    else:
+        exp_logit = math.exp(logit)
+        probability = exp_logit / (1.0 + exp_logit)
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ValueError("calibrated probability is invalid")
+    return probability
+
+
+def _load_calibrator_artifact(
+    profile: Mapping[str, Any],
+    *,
+    calibrator_root: str | Path | None,
+    feature_schema_version: str,
+) -> tuple[dict[str, Any] | None, Path | None, str | None]:
+    """Load only the safe built-in JSON calibrator format.
+
+    Arbitrary pickle/Python artifacts are deliberately unsupported.  A profile
+    can therefore never obtain authority merely by pointing at a hashed file;
+    the runtime must parse and execute this exact versioned schema.
+    """
+    calibrator = profile.get("calibrator")
+    if not isinstance(calibrator, Mapping):
+        return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    if str(calibrator.get("type", "")) != "platt":
+        return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    if str(calibrator.get("engine", "")) != _CALIBRATOR_ENGINE:
+        return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    if str(calibrator.get("format", "")) != _CALIBRATOR_FORMAT:
+        return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    if str(calibrator.get("feature_schema_version", "")) != str(feature_schema_version) or str(calibrator.get("normalization_version", "")) != _NORMALIZATION_VERSION:
+        return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    path = _resolve_calibrator_path(calibrator, profile, calibrator_root)
+    expected_hash = str(calibrator.get("artifact_sha256", "")).casefold()
+    if path is None or not path.is_file() or not _SHA256.fullmatch(expected_hash):
+        return None, path, "BLOCKED_CALIBRATOR_ARTIFACT"
+    try:
+        payload = load_safe_calibrator(path, expected_hash, feature_schema_version)
+    except ValueError:
+        return None, path, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    return payload, path, None
+
+
+def _alignment_feature_vector(
+    alignment_target: Mapping[str, Any],
+    *,
+    target_score: float,
+    performance_mode: str | None,
+) -> dict[str, float] | None:
+    """Build the exact feature contract consumed by the calibrator."""
+    expected_count = len([row for row in (alignment_target.get("char_segments") or []) if isinstance(row, Mapping) and row.get("expected_index") is not None])
+    denominator = float(max(1, expected_count))
+    values: dict[str, Any] = {
+        "target_score": target_score,
+        "native_char_coverage": alignment_target.get("native_char_coverage"),
+        "mean_char_score": alignment_target.get("mean_char_score"),
+        "minimum_char_score": alignment_target.get("minimum_char_score"),
+        "p10_char_score": alignment_target.get("p10_char_score"),
+        "delete_ratio": float(alignment_target.get("delete_count", 0) or 0) / denominator,
+        "substitute_ratio": float(alignment_target.get("substitute_count", 0) or 0) / denominator,
+        "insert_ratio": float(alignment_target.get("insert_count", 0) or 0) / denominator,
+        "interpolated_ratio": float(alignment_target.get("interpolated_count", 0) or 0) / denominator,
+        "compression_ratio": alignment_target.get("compression_ratio"),
+        "characters_per_second": alignment_target.get("characters_per_second"),
+        "words_per_second": alignment_target.get("words_per_second"),
+        "duration": alignment_target.get("duration"),
+        "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper()),
+    }
+    try:
+        result = {key: float(values[key]) for key in _CALIBRATOR_FEATURES}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(not math.isfinite(value) for value in result.values()):
+        return None
+    return result
+
+
+def _final_anchor_feature_vector(
+    alignment_target: Mapping[str, Any],
+    *,
+    target_score: float,
+    performance_mode: str | None,
+) -> dict[str, float] | None:
+    evidence = alignment_target.get("final_anchor_evidence")
+    if not isinstance(evidence, Mapping):
+        return None
+    expected_count = max(1, int(evidence.get("expected_characters", 0) or 0))
+    duration = (float(evidence["duration_ms"]) / 1000.0) if evidence.get("duration_ms") is not None else None
+    values: dict[str, Any] = {
+        "target_score": target_score,
+        "native_char_coverage": evidence.get("coverage"),
+        "mean_char_score": evidence.get("mean_score"),
+        "minimum_char_score": evidence.get("minimum_score"),
+        "p10_char_score": evidence.get("minimum_score"),
+        "delete_ratio": float(evidence.get("deleted_characters", 0) or 0) / expected_count,
+        "substitute_ratio": float(evidence.get("substituted_characters", 0) or 0) / expected_count,
+        "insert_ratio": float(evidence.get("insertions_inside_anchor", 0) or 0) / expected_count,
+        "interpolated_ratio": 1.0 if evidence.get("interpolated") else 0.0,
+        "compression_ratio": alignment_target.get("compression_ratio"),
+        "characters_per_second": (expected_count / duration) if duration and duration > 0 else None,
+        "words_per_second": (1.0 / duration) if duration and duration > 0 else None,
+        "duration": duration,
+        "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper()),
+    }
+    try:
+        result = {key: float(values[key]) for key in _CALIBRATOR_FEATURES}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(not math.isfinite(value) for value in result.values()):
+        return None
+    return result
+
+
+def _feature_vector_hash(features: Mapping[str, float]) -> str:
+    return sha256_bytes(canonical_json({"schema": "char-alignment-v2", "normalization_version": _NORMALIZATION_VERSION, "features": dict(features)}))
+
+
+def _execute_platt_calibrator(
+    artifact: Mapping[str, Any],
+    features: Mapping[str, float],
+) -> float | None:
+    try:
+        return predict_probability(artifact, features)
+    except ValueError:
+        return None
+
+
 def calibration_profile_status(
     profile: Mapping[str, Any] | None,
     *,
@@ -290,7 +564,7 @@ def calibration_profile_status(
     target_language: str,
     source_language: str,
     performance_mode: str | None = None,
-    feature_schema_version: str = "char-alignment-v1",
+    feature_schema_version: str = _FEATURE_SCHEMA_VERSION,
     calibrator_root: str | Path | None = None,
     runtime_lock_sha256: str | None = None,
     models_lock_sha256: str | None = None,
@@ -343,12 +617,9 @@ def calibration_profile_status(
         return "BLOCKED_INVALID_THRESHOLDS"
     if not all(str(calibrator.get(key, "")).strip() for key in ("type", "artifact_path", "artifact_sha256")) or not _SHA256.fullmatch(str(calibrator.get("artifact_sha256", ""))):
         return "BLOCKED_INCOMPLETE_PROFILE"
-    artifact_path = Path(str(calibrator["artifact_path"]))
-    if not artifact_path.is_absolute():
-        root_value = calibrator_root or profile.get("profile_root")
-        if root_value in (None, ""):
-            return "BLOCKED_CALIBRATOR_ARTIFACT"
-        artifact_path = Path(root_value) / artifact_path
+    artifact_path = _resolve_calibrator_path(calibrator, profile, calibrator_root)
+    if artifact_path is None:
+        return "BLOCKED_CALIBRATOR_ARTIFACT"
     if not artifact_path.is_file():
         return "BLOCKED_CALIBRATOR_ARTIFACT"
     try:
@@ -356,6 +627,17 @@ def calibration_profile_status(
             return "BLOCKED_CALIBRATOR_HASH"
     except OSError:
         return "BLOCKED_CALIBRATOR_ARTIFACT"
+    if not all(str(calibrator.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
+        return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    loaded, _loaded_path, executable_status = _load_calibrator_artifact(
+        profile,
+        calibrator_root=calibrator_root,
+        feature_schema_version=feature_schema_version,
+    )
+    if executable_status:
+        return executable_status
+    if loaded is None:
+        return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     dataset_hashes = {"manifest_sha256", "labels_sha256", "split_manifest_sha256"}
     if not dataset_hashes.issubset(dataset) or any(not _SHA256.fullmatch(str(dataset.get(key, ""))) for key in dataset_hashes):
         return "BLOCKED_INCOMPLETE_PROFILE"
@@ -396,17 +678,26 @@ def _final_anchor_is_calibrated(
     profile: Mapping[str, Any] | None,
     feature_schema_version: str,
 ) -> bool:
-    """Require the commit-3 final-anchor evidence for calibrated authority."""
+    """Require calibrated final-anchor evidence for hard authority."""
     evidence = decision.final_anchor_evidence
-    if feature_schema_version == "char-alignment-v1":
+    if feature_schema_version == _FEATURE_SCHEMA_VERSION:
         if not isinstance(evidence, Mapping):
             return False
         if bool(evidence.get("interpolated")):
             return False
-        minimum = evidence.get("minimum_score")
         threshold = _validated_profile_threshold(profile, "final_anchor_pass_probability", 1.0)
         try:
-            return minimum is not None and float(minimum) >= threshold
+            probability = decision.calibrated_final_anchor_probability
+            return (
+                probability is not None
+                and float(probability) >= threshold
+                and evidence.get("status") == "FINAL_ANCHOR_EVIDENCE_COLLECTED"
+                and evidence.get("timing_valid") is True
+                and float(evidence.get("duration_ms") or 0.0) > 0.0
+                and int(evidence.get("substituted_characters", 0) or 0) == 0
+                and int(evidence.get("deleted_characters", 0) or 0) == 0
+                and int(evidence.get("insertions_inside_anchor", 0) or 0) == 0
+            )
         except (TypeError, ValueError):
             return False
     return decision.final_anchor_present is True
@@ -425,7 +716,7 @@ def apply_independent_evidence(
     calibration_authority: bool = False,
     calibration_profile: Mapping[str, Any] | None = None,
     calibration_profile_root: str | Path | None = None,
-    feature_schema_version: str = "char-alignment-v1",
+    feature_schema_version: str = _FEATURE_SCHEMA_VERSION,
     backend_id: str | None = None,
     runtime_lock_sha256: str | None = None,
     models_lock_sha256: str | None = None,
@@ -483,10 +774,101 @@ def apply_independent_evidence(
         final_anchor_evidence = None
     records = list(base.evidence_records)
     records.extend(list(alignment_evidence.get("evidence_records") or []))
-    if lid_evidence:
-        if lid_evidence.get("record"):
-            records.append(dict(lid_evidence["record"]))
+    if lid_evidence and lid_evidence.get("record"):
+        records.append(dict(lid_evidence["record"]))
     families = sorted({str(family) for family in base.evidence_families if family} | {str(item.get("evidence_family")) for item in records if item.get("evidence_family")})
+    raw_target_score = target_score
+    calibrated_target_probability: float | None = None
+    raw_final_anchor_score: float | None = None
+    calibrated_final_anchor_probability: float | None = None
+    feature_vector: dict[str, float] | None = None
+    feature_vector_hash: str | None = None
+    final_anchor_feature_vector: dict[str, float] | None = None
+    final_anchor_feature_vector_hash: str | None = None
+    calibrator_hash: str | None = None
+    if calibrated:
+        calibrator, _calibrator_path, execution_status = _load_calibrator_artifact(
+            calibration_profile or {},
+            calibrator_root=calibration_profile_root,
+            feature_schema_version=feature_schema_version,
+        )
+        if execution_status or calibrator is None:
+            return LinguisticDecision(
+                **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
+                   "source_alignment_score": source_score, "alignment_margin": margin,
+                   "cross_language_margin": margin, "final_anchor_present": None,
+                   "final_anchor_evidence": final_anchor_evidence,
+                   "char_segments": [dict(item) for item in (alignment_target.get("char_segments") or [])],
+                   "native_char_coverage": alignment_target.get("native_char_coverage"),
+                   "mean_char_score": alignment_target.get("mean_char_score"),
+                   "minimum_char_score": alignment_target.get("minimum_char_score"),
+                   "p10_char_score": alignment_target.get("p10_char_score"),
+                   "unaligned_characters": list(alignment_target.get("unaligned_characters") or []),
+                   "interpolated_characters": list(alignment_target.get("interpolated_characters") or []),
+                   "compression_ratio": alignment_target.get("compression_ratio"),
+                   "raw_target_score": raw_target_score,
+                   "calibrated_target_probability": None,
+                   "evidence_records": records, "evidence_families": families,
+                   "calibration_authority": False,
+                   "calibration_profile_status": execution_status or "BLOCKED_CALIBRATOR_NOT_EXECUTABLE",
+                   "reason": "validated profile could not be executed by the built-in safe calibrator"}
+            )
+        calibrator_hash = str((calibration_profile or {}).get("calibrator", {}).get("artifact_sha256", ""))
+        feature_vector = _alignment_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
+        final_anchor_feature_vector = _final_anchor_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
+        if feature_vector is None or final_anchor_feature_vector is None:
+            return LinguisticDecision(
+                **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
+                   "source_alignment_score": source_score, "alignment_margin": margin,
+                   "cross_language_margin": margin, "final_anchor_present": None,
+                   "final_anchor_evidence": final_anchor_evidence,
+                   "char_segments": [dict(item) for item in (alignment_target.get("char_segments") or [])],
+                   "native_char_coverage": alignment_target.get("native_char_coverage"),
+                   "mean_char_score": alignment_target.get("mean_char_score"),
+                   "minimum_char_score": alignment_target.get("minimum_char_score"),
+                   "p10_char_score": alignment_target.get("p10_char_score"),
+                   "unaligned_characters": list(alignment_target.get("unaligned_characters") or []),
+                   "interpolated_characters": list(alignment_target.get("interpolated_characters") or []),
+                   "compression_ratio": alignment_target.get("compression_ratio"),
+                   "raw_target_score": raw_target_score,
+                   "calibrated_target_probability": None,
+                   "feature_vector": feature_vector,
+                   "feature_vector_hash": _feature_vector_hash(feature_vector) if feature_vector is not None else None,
+                   "calibrator_hash": calibrator_hash,
+                   "calibrator_artifact_sha256": calibrator_hash,
+                   "evidence_records": records, "evidence_families": families,
+                   "calibration_authority": False,
+                   "calibration_profile_status": "BLOCKED_CALIBRATION_FEATURES",
+                   "reason": "calibrated alignment requires complete character-level features and final-anchor evidence"}
+            )
+        feature_vector_hash = _feature_vector_hash(feature_vector)
+        final_anchor_feature_vector_hash = _feature_vector_hash(final_anchor_feature_vector)
+        calibrated_target_probability = _execute_platt_calibrator(calibrator, feature_vector)
+        calibrated_final_anchor_probability = _execute_platt_calibrator(calibrator, final_anchor_feature_vector)
+        if calibrated_target_probability is None or calibrated_final_anchor_probability is None:
+            return LinguisticDecision(
+                **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
+                   "source_alignment_score": source_score, "alignment_margin": margin,
+                   "cross_language_margin": margin, "final_anchor_present": None,
+                   "final_anchor_evidence": final_anchor_evidence,
+                   "raw_target_score": raw_target_score,
+                   "calibrated_target_probability": calibrated_target_probability,
+                   "raw_final_anchor_score": (final_anchor_evidence or {}).get("minimum_score"),
+                   "calibrated_final_anchor_probability": calibrated_final_anchor_probability,
+                   "feature_vector": feature_vector, "feature_vector_hash": feature_vector_hash,
+                   "final_anchor_feature_vector": final_anchor_feature_vector,
+                   "final_anchor_feature_vector_hash": final_anchor_feature_vector_hash,
+                   "calibrator_hash": calibrator_hash,
+                   "calibrator_artifact_sha256": calibrator_hash,
+                   "evidence_records": records, "evidence_families": families,
+                   "calibration_authority": False,
+                   "calibration_profile_status": "BLOCKED_CALIBRATION_EXECUTION",
+                   "reason": "calibrator execution returned no finite probability"}
+            )
+        if final_anchor_evidence is not None:
+            final_anchor_evidence["calibrated_probability"] = calibrated_final_anchor_probability
+            final_anchor_evidence["calibrator_artifact_sha256"] = calibrator_hash
+            final_anchor_evidence["feature_vector_hash"] = final_anchor_feature_vector_hash
     if base.audio_sha256:
         mismatched = [item for item in records if item.get("audio_sha256") and item.get("audio_sha256") != base.audio_sha256]
         if mismatched:
@@ -543,8 +925,14 @@ def apply_independent_evidence(
     ) or base.status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION"}
     target_pass_threshold = _validated_profile_threshold(calibration_profile if calibrated else None, "target_pass_probability", min_target_score)
     target_failure_threshold = _validated_profile_threshold(calibration_profile if calibrated else None, "target_failure_probability", min_target_score - .15)
-    target_alignment_wins = target_score >= target_pass_threshold
-    target_alignment_weak = target_score < target_failure_threshold if calibrated else target_score < min_target_score
+    target_alignment_wins = (
+        calibrated_target_probability is not None and calibrated_target_probability >= target_pass_threshold
+        if calibrated else target_score >= min_target_score
+    )
+    target_alignment_weak = (
+        calibrated_target_probability is not None and calibrated_target_probability < target_failure_threshold
+        if calibrated else target_score < min_target_score
+    )
 
     if not calibrated:
         if whisper_source and target_alignment_wins:
@@ -573,7 +961,7 @@ def apply_independent_evidence(
     elif target_alignment_wins:
         status = "PASS_CONFIRMED" if base.status == "PASS_SCREENED" else "PASS_PHONETIC"
         reason = "calibrated target-only CTC supports target phonetic content; cross-language margin is diagnostic"
-    elif target_score < target_failure_threshold:
+    elif calibrated_target_probability is not None and calibrated_target_probability < target_failure_threshold:
         status = "LEXICAL_FAILURE_CONFIRMED"
         reason = "calibrated target-only alignment rejects the target content"
     else:
@@ -591,7 +979,26 @@ def apply_independent_evidence(
            "p10_char_score": alignment_target.get("p10_char_score"),
            "unaligned_characters": list(alignment_target.get("unaligned_characters") or []),
            "interpolated_characters": list(alignment_target.get("interpolated_characters") or []),
+           "delete_count": int(alignment_target.get("delete_count", 0) or 0),
+           "insert_count": int(alignment_target.get("insert_count", 0) or 0),
+           "substitute_count": int(alignment_target.get("substitute_count", 0) or 0),
+           "interpolated_count": int(alignment_target.get("interpolated_count", 0) or 0),
+           "alignment_operation_hash": alignment_target.get("alignment_operation_hash"),
            "compression_ratio": alignment_target.get("compression_ratio"),
+           "duration": alignment_target.get("duration"),
+           "characters_per_second": alignment_target.get("characters_per_second"),
+           "words_per_second": alignment_target.get("words_per_second"),
+           "normalization_version": alignment_target.get("normalization_version", _NORMALIZATION_VERSION),
+           "raw_target_score": raw_target_score,
+           "calibrated_target_probability": calibrated_target_probability,
+           "raw_final_anchor_score": (final_anchor_evidence or {}).get("minimum_score"),
+           "calibrated_final_anchor_probability": calibrated_final_anchor_probability,
+           "feature_vector": feature_vector,
+           "feature_vector_hash": feature_vector_hash,
+           "final_anchor_feature_vector": final_anchor_feature_vector,
+           "final_anchor_feature_vector_hash": final_anchor_feature_vector_hash,
+           "calibrator_hash": calibrator_hash,
+           "calibrator_artifact_sha256": calibrator_hash,
            "evidence_records": records, "evidence_families": families,
            "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
            "calibration_authority": calibrated, "calibration_profile_status": profile_status,
@@ -627,7 +1034,7 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           calibration_authority: bool = False,
                           calibration_profile: Mapping[str, Any] | None = None,
                           calibration_profile_root: str | Path | None = None,
-                          feature_schema_version: str = "char-alignment-v1",
+                          feature_schema_version: str = _FEATURE_SCHEMA_VERSION,
                           backend_id: str | None = None,
                           runtime_lock_sha256: str | None = None,
                           models_lock_sha256: str | None = None,
@@ -727,16 +1134,17 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         alignment_calibrated = bool(
             lexical_decision.calibration_authority
             and lexical_decision.calibration_profile_status == "MATCHED_VALIDATED"
+            and lexical_decision.calibrated_target_probability is not None
         )
         target_pass_threshold = _validated_profile_threshold(calibration_profile if alignment_calibrated else None, "target_pass_probability", alignment_min_target_score)
         source_lid_threshold = _validated_profile_threshold(calibration_profile if alignment_calibrated else None, "source_lid_probability", .70)
-        alignment_confirms_content = alignment_calibrated and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.expected_alignment_score is not None and lexical_decision.expected_alignment_score >= target_pass_threshold
+        alignment_confirms_content = alignment_calibrated and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.calibrated_target_probability >= target_pass_threshold
         # A CTC score may rescue a Whisper lexical miss, but it may not
         # silently certify an absent final-word anchor.  ``None`` remains
         # unknown and therefore keeps the hard final-word gate closed.
         alignment_confirms_final = alignment_confirms_content and _final_anchor_is_calibrated(lexical_decision, profile=calibration_profile, feature_schema_version=feature_schema_version)
-        gates["content"] = _gate("content", GateStatus.PASS if (forced_content_ok or alignment_confirms_content) else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_content}, evidence_hash=evidence_hash)
-        gates["final_word"] = _gate("final_word", GateStatus.PASS if (forced_final_ok or alignment_confirms_final) else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_final}, evidence_hash=evidence_hash)
+        gates["content"] = _gate("content", GateStatus.PASS if (forced_content_ok or alignment_confirms_content) else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_content, "raw_target_score": lexical_decision.raw_target_score, "calibrated_target_probability": lexical_decision.calibrated_target_probability}, evidence_hash=evidence_hash)
+        gates["final_word"] = _gate("final_word", GateStatus.PASS if (forced_final_ok or alignment_confirms_final) else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_final, "raw_final_anchor_score": lexical_decision.raw_final_anchor_score, "calibrated_final_anchor_probability": lexical_decision.calibrated_final_anchor_probability}, evidence_hash=evidence_hash)
         independent_source_lid = bool(
             lid_evidence
             and str((lid_evidence.get("record") or {}).get("evidence_family", "")) == "AUDIO_LANGUAGE_ID"
@@ -875,7 +1283,7 @@ def select_passed_v2(evaluations: Sequence[tuple[Any, QAResultV2]]) -> tuple[Any
 
 __all__ = [
     "LanguageProfile", "LinguisticDecision", "LinguisticStatus", "QAResultV2",
-    "apply_independent_evidence", "calibration_profile_status", "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word",
+    "apply_independent_evidence", "calibration_profile_status", "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word", "load_safe_calibrator", "predict_probability",
     "is_provisional_result", "linguistic_status", "ordered_content", "rank_provisional_v2",
     "select_passed_v2", "source_language_leak",
 ]

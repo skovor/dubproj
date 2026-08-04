@@ -41,9 +41,18 @@ hash-only baseline in the external sandbox.
   A mismatched requested profile is `BLOCKED`, never an implicit fallback.
 - The validated calibration contract binds authority to a real calibrator
   artifact/hash, dataset and split hashes, thresholds, metrics, provenance,
-  runtime/model locks, and `char-alignment-v1`. Character-level alignment is
+  runtime/model locks, `char-alignment-v2`, and
+  `alignment-text-normalization-v1`. Character-level alignment is
   collected separately as diagnostic evidence; it cannot grant authority by
   itself.
+- The safe calibration executor accepts only the versioned JSON Platt format;
+  it computes a sigmoid over the declared feature vector and records the raw
+  score, calibrated probabilities, feature-vector hashes, and calibrator SHA.
+  Unknown/inert formats are `BLOCKED_CALIBRATOR_NOT_EXECUTABLE`.
+- Character evidence uses deterministic sequence backtrace operations
+  (`MATCH`, `SUBSTITUTE`, `DELETE`, `INSERT`, `INTERPOLATED`). Coverage and
+  final-anchor metrics are derived from those operations, never from a
+  positional row index.
 - `post_qa.py` makes the delivery boundary explicit: every raw candidate is
   re-audited after processing, after surgical mounting, and after reopening
   the serialized artifact. FMV scenes receive a final full-scene audit that
