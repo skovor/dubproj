@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import platform
 import re
@@ -384,7 +385,7 @@ def reproducibility_report(config: Any, *, strict: bool | None = None) -> dict[s
         if _is_unknown(value):
             (errors if strict else warnings).append(f"config.{field} is not pinned")
     if runtime is not None and strict:
-        snapshot = collect_runtime_lock(device=str(getattr(config, "device", "cuda")), capabilities=getattr(config, "capabilities", None), omnivoice_version=str(getattr(config, "backend_version", "unknown")))
+        snapshot = collect_runtime_lock(device=str(getattr(config, "device", "cuda")), capabilities=getattr(config, "capabilities", None))
         live_errors, live_warnings = compare_runtime_snapshot(runtime, snapshot)
         errors.extend(live_errors)
         warnings.extend(live_warnings)
@@ -481,6 +482,18 @@ def _state_for(value: Any, *, required: bool) -> dict[str, Any]:
     return {"status": "REQUIRED_BUT_MISSING" if required else "DISABLED_EXPLICITLY", "version": None}
 
 
+def _omnivoice_version(override: str | None) -> str | None:
+    """Use an explicit source revision only when the backend is importable."""
+    installed = package_version("omnivoice")
+    if installed is not None:
+        return installed
+    try:
+        spec = importlib.util.find_spec("omnivoice")
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return None
+    return override if spec is not None and _pinned(override) else None
+
+
 def collect_runtime_lock(*, device: str = "cuda", capabilities: Mapping[str, Any] | None = None, omnivoice_version: str | None = None) -> dict[str, Any]:
     """Collect a live snapshot and mark it COMPLETE only if it is usable."""
     caps = _capabilities(capabilities)
@@ -500,7 +513,7 @@ def collect_runtime_lock(*, device: str = "cuda", capabilities: Mapping[str, Any
         "faster_whisper": package_version("faster-whisper"), "ctranslate2": package_version("ctranslate2"),
         "whisperx": package_version("whisperx"), "speechbrain": package_version("speechbrain"),
         "mfa": package_version("montreal-forced-aligner"), "ffmpeg": executable_version("ffmpeg"),
-        "omnivoice": omnivoice_version,
+        "omnivoice": _omnivoice_version(omnivoice_version),
     }
     for name, value in raw_values.items():
         needs = name in required or (name in {"cuda", "nvidia_driver"} and cuda_enabled)
