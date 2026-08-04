@@ -1,0 +1,7 @@
+{
+  "name": "generation-qa",
+  "phases": ["G", "H", "I"],
+  "triggers": ["generar tts", "reintentar toma fallida", "qa automatico",
+              "revision perceptual", "compuertas duras", "lineas de voz separadas",
+              "rondas globales FMV", "ultima palabra OmniVoice"]
+}

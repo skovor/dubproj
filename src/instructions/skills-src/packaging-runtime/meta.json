@@ -1,0 +1,6 @@
+{
+  "name": "packaging-runtime",
+  "phases": ["J", "K"],
+  "triggers": ["empaquetar release", "desplegar mod", "smoke test in-game",
+              "backup antes de deploy"]
+}

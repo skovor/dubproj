@@ -7,6 +7,12 @@
     "entrypoint": "scripts/run_pipeline.py",
     "topologies": ["LINE_SEPARATED", "IN_ENGINE_TIMELINE", "EMBEDDED_FMV"]
   },
+  "instruction_bundle": {
+    "path": "instructions",
+    "skills": 9,
+    "promoted_rules": ["AC-57", "AC-58", "AC-59", "AC-60", "AC-61", "AC-62", "AC-63", "AC-64", "AC-65", "AC-66"],
+    "excludes": ["KIRO", "audio", "video", "subtitle_dumps", "model_weights", "credentials", "project_reports"]
+  },
   "ported_modules": {
     "generation_and_montage": [
       "produce_anime_scene.py",

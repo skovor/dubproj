@@ -1,0 +1,7 @@
+{
+  "name": "fmv-audio",
+  "phases": ["E", "G", "H"],
+  "triggers": ["pelicula prerenderizada", "fmv", "audio multiplexado en video",
+              "timing de cutscene", "voz incrustada en usm/webm/bik",
+              "Empalme B", "preservar onomatopeya", "source_resume"]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "dialogue-mapping",
+  "phases": ["C"],
+  "triggers": ["mapear texto a audio", "resolver cue a stream fisico",
+              "verificar trigger de linea", "linea huerfana",
+              "asociar subtitulo con timebase FMV", "anclas ASR insuficientes"]
+}

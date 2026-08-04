@@ -1,0 +1,7 @@
+{
+  "name": "dubbing-router",
+  "phases": [],
+  "triggers": ["determinar fase de trabajo", "no se sabe en que fase estoy",
+              "tarea nueva de doblaje", "enrutar antes de empezar",
+              "distinguir linea separada de FMV", "clasificar topologia de audio"]
+}

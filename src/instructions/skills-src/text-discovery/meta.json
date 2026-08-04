@@ -1,0 +1,6 @@
+{
+  "name": "text-discovery",
+  "phases": ["B", "C"],
+  "triggers": ["texto oficial ausente", "no hay LOCRES", "buscar texto localizado",
+              "cue sin texto asociado"]
+}

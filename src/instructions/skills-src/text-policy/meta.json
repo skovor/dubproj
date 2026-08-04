@@ -1,0 +1,7 @@
+{
+  "name": "text-policy",
+  "phases": ["D"],
+  "triggers": ["normalizar texto para tts", "decidir keep_original vs tts",
+              "auditoria textual", "texto oficial vs texto de entrega",
+              "separar source_text target_text tts_text", "subtitle-only"]
+}

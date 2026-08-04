@@ -1,0 +1,6 @@
+{
+  "name": "inventory-roundtrip",
+  "phases": ["A", "B"],
+  "triggers": ["inventario inicial", "round-trip de contenedores",
+              "verificar extraccion antes de mapear"]
+}

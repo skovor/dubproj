@@ -25,3 +25,7 @@ python scripts/run_pipeline.py validate --config config/project.example.json --m
 
 See `src/docs/GPT_REVIEW_PROMPT.md` for an evidence-only external review and
 `src/PORT_MANIFEST.json` for the port inventory.
+
+The portable instruction layer (nine skills plus promoted AC-57…AC-66 rules)
+is under [`src/instructions/`](src/instructions/README.md). It is sanitized:
+no KIRO files, game corpus, audio, credentials or model data are included.

@@ -1,0 +1,6 @@
+{
+  "name": "unknown-game-diagnosis",
+  "phases": ["X_DIAGNOSIS"],
+  "triggers": ["juego nuevo", "motor desconocido", "formato no documentado",
+              "fase bloqueada sin saber por que"]
+}

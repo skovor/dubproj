@@ -1,0 +1,17 @@
+{
+  "schema": "generic-dubbing-rule-promotion-v1",
+  "source_policy": "Lesson evidence and project paths are intentionally omitted; only generic rule bodies and skill routes are distributed.",
+  "excluded": ["KIRO", "audio", "video", "subtitle_dumps", "model_weights", "credentials", "project_reports"],
+  "rules": [
+    {"rule_id": "AC-57", "lesson_ids": ["LESSON-0043", "LESSON-0044", "LESSON-0045"], "title": "Retries depend on defect and topology"},
+    {"rule_id": "AC-58", "lesson_ids": ["LESSON-0046", "LESSON-0047"], "title": "FMV rounds are global; isolated listening is not a production override"},
+    {"rule_id": "AC-59", "lesson_ids": ["LESSON-0048", "LESSON-0049", "LESSON-0050"], "title": "Separate language, content and fallback per delivery"},
+    {"rule_id": "AC-60", "lesson_ids": ["LESSON-0051", "LESSON-0060", "LESSON-0061"], "title": "Delivery boundaries require acoustic, linguistic and map evidence"},
+    {"rule_id": "AC-61", "lesson_ids": ["LESSON-0052", "LESSON-0053"], "title": "Separate synthesis and QA resources by cohort"},
+    {"rule_id": "AC-62", "lesson_ids": ["LESSON-0054", "LESSON-0055"], "title": "Distinguish headroom, clipping and serialization"},
+    {"rule_id": "AC-63", "lesson_ids": ["LESSON-0056"], "title": "Short lines need same-actor reference context"},
+    {"rule_id": "AC-64", "lesson_ids": ["LESSON-0057"], "title": "Persist long-run state atomically and resumably"},
+    {"rule_id": "AC-65", "lesson_ids": ["LESSON-0058"], "title": "Close only after reauditing real artifacts"},
+    {"rule_id": "AC-66", "lesson_ids": ["LESSON-0059"], "title": "Diagnostic encoding cannot block container validation"}
+  ]
+}
