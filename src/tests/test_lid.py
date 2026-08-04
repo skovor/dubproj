@@ -1,0 +1,24 @@
+from __future__ import annotations
+import tempfile, unittest
+from pathlib import Path
+from dubbing_pipeline.lid import LIDPolicy, independent_lid, fuse_language_evidence
+
+class Backend:
+    backend_id="speechbrain-ecapa"; model_id="voxlingua107"; model_revision="r1"
+    def detect(self, path, sample_rate=16000): return {"language":"en","probabilities":{"en":.92,"de":.05}}
+
+class LIDTests(unittest.TestCase):
+    def test_short_clip_not_applicable(self):
+        with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=.1, speech_ratio=1, sample_rate=48000, audio_sha256="a"*64)
+        self.assertEqual(evidence.status, "LID_NOT_APPLICABLE")
+    def test_independent_backend_and_hash(self):
+        with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=1, speech_ratio=.8, sample_rate=48000, audio_sha256="a"*64)
+        self.assertEqual(evidence.status, "LID_CONFIDENT"); self.assertEqual(evidence.backend_id, "speechbrain-ecapa"); self.assertEqual(len(evidence.evidence_hash), 64)
+    def test_concordance_confirms_leak(self):
+        with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=1, speech_ratio=.8, sample_rate=48000, audio_sha256="a"*64)
+        result=fuse_language_evidence(whisper_language="en", whisper_probability=.9, lid=evidence, ctc_target_probability=.2, policy=LIDPolicy()); self.assertEqual(result["status"], "LANGUAGE_LEAK_CONFIRMED")
+    def test_ctc_conflict_is_not_leak(self):
+        with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=1, speech_ratio=.8, sample_rate=48000, audio_sha256="a"*64)
+        result=fuse_language_evidence(whisper_language="en", whisper_probability=.9, lid=evidence, ctc_target_probability=.9, policy=LIDPolicy()); self.assertEqual(result["status"], "EVIDENCE_CONFLICT")
+
+if __name__ == "__main__": unittest.main()
