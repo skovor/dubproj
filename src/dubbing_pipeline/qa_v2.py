@@ -48,16 +48,23 @@ class QAResultV2:
 
 LinguisticStatus = Literal[
     "PASS_SCREENED",
+    "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT",
     "PASS_CONFIRMED",
     "PASS_PHONETIC",
+    "TARGET_ALIGNMENT_SUPPORT",
+    "TARGET_ALIGNMENT_WEAK",
+    "EVIDENCE_CONFLICT",
     "ASR_UNCERTAIN",
     "ALIGNMENT_UNCERTAIN",
     "LANGUAGE_LEAK_CONFIRMED",
     "LANGUAGE_LEAK_SUSPECTED",
+    "LANGUAGE_LEAK_STRONG_SUSPICION",
+    "LEXICAL_FAILURE_CONFIRMED",
     "LEXICAL_FAILURE_SUSPECTED",
     "ALIGNER_NOT_APPLICABLE",
     "PERFORMANCE_UNCERTAIN",
     "HUMAN_REVIEW",
+    "BLOCKED",
     "NOT_APPLICABLE",
 ]
 
@@ -88,6 +95,8 @@ class LinguisticDecision:
     audio_sha256: str | None = None
     screened: bool = False
     confirmed: bool = False
+    calibration_authority: bool = False
+    calibration_profile_status: str = "DISABLED"
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -114,6 +123,8 @@ class LinguisticDecision:
             "audio_sha256": self.audio_sha256,
             "screened": self.screened,
             "confirmed": self.confirmed,
+            "calibration_authority": self.calibration_authority,
+            "calibration_profile_status": self.calibration_profile_status,
             "reason": self.reason,
         }
 
@@ -248,6 +259,71 @@ def decide_linguistic_evidence(
     )
 
 
+def calibration_profile_status(
+    profile: Mapping[str, Any] | None,
+    *,
+    authority: bool,
+    model_id: str | None,
+    model_revision: str | None,
+    target_language: str,
+    source_language: str,
+    performance_mode: str | None = None,
+) -> str:
+    """Return the authority state for an acoustic calibration profile.
+
+    A CTC score is not a probability merely because it is numeric.  The
+    profile therefore has to opt in explicitly and bind the score to the
+    exact aligner model/revision, language pair, and (when declared) vocal
+    performance mode.  ``BLOCKED`` is deliberately returned for a requested
+    authority with a missing or mismatched profile instead of silently
+    falling back to an uncalibrated threshold.
+    """
+    if not authority:
+        return "DISABLED"
+    if not isinstance(profile, Mapping):
+        return "BLOCKED_MISSING_PROFILE"
+    schema = str(profile.get("schema", ""))
+    if schema not in {
+        "generic-dubbing-calibration-profile-v1",
+        "generic-dubbing-alignment-calibration-v1",
+        "generic-dubbing-calibration-v1",
+    }:
+        return "BLOCKED_SCHEMA"
+    if profile.get("authority", profile.get("calibration_authority")) is not True:
+        return "BLOCKED_PROFILE_NOT_AUTHORIZED"
+    identity = profile.get("identity") if isinstance(profile.get("identity"), Mapping) else profile
+    model = identity.get("model") if isinstance(identity.get("model"), Mapping) else identity
+    languages = identity.get("languages") or identity.get("language_pair")
+    if not isinstance(languages, Mapping):
+        languages = identity
+    expected = {
+        "model_id": model_id if model_id is not None else model.get("id"),
+        "model_revision": model_revision if model_revision is not None else model.get("revision"),
+        "target_language": target_language if target_language is not None else languages.get("target"),
+        "source_language": source_language if source_language is not None else languages.get("source"),
+    }
+    for key, value in expected.items():
+        profile_value = model.get(key) if key in {"model_id", "model_revision"} else languages.get(key)
+        if key == "model_id":
+            profile_value = model.get("id", model.get("model_id", identity.get("model_id", "")))
+        elif key == "model_revision":
+            profile_value = model.get("revision", model.get("model_revision", identity.get("model_revision", "")))
+        elif key == "target_language":
+            profile_value = languages.get("target_language", languages.get("target", identity.get("target_language", "")))
+        elif key == "source_language":
+            profile_value = languages.get("source_language", languages.get("source", identity.get("source_language", "")))
+        if value in (None, "") or str(profile_value) != str(value):
+            return "BLOCKED_IDENTITY_MISMATCH"
+    declared_mode = identity.get("performance_mode")
+    declared_modes = identity.get("performance_modes")
+    if declared_mode is not None and str(declared_mode) != str(performance_mode or ""):
+        return "BLOCKED_MODE_MISMATCH"
+    if declared_modes is not None:
+        if not isinstance(declared_modes, (list, tuple, set)) or str(performance_mode or "") not in {str(item) for item in declared_modes}:
+            return "BLOCKED_MODE_MISMATCH"
+    return "MATCHED"
+
+
 def apply_independent_evidence(
     base: LinguisticDecision,
     alignment_evidence: Mapping[str, Any] | None,
@@ -258,6 +334,11 @@ def apply_independent_evidence(
     source_leak_score: float = .75,
     target_language: str = "de",
     source_language: str = "en",
+    calibration_authority: bool = False,
+    calibration_profile: Mapping[str, Any] | None = None,
+    model_id: str | None = None,
+    model_revision: str | None = None,
+    performance_mode: str | None = None,
 ) -> LinguisticDecision:
     """Promote a screen only after a genuinely different evidence family.
 
@@ -266,9 +347,26 @@ def apply_independent_evidence(
     A source-language leak additionally requires automatic Whisper to favour
     the source language, independent LID, and a weak target-only CTC result.
     """
+    profile_status = calibration_profile_status(
+        calibration_profile,
+        authority=bool(calibration_authority),
+        model_id=model_id,
+        model_revision=model_revision,
+        target_language=target_language,
+        source_language=source_language,
+        performance_mode=performance_mode,
+    )
+    calibrated = profile_status == "MATCHED"
+    if calibration_authority and not calibrated and not alignment_evidence:
+        return LinguisticDecision(
+            **{**base.__dict__, "status": "BLOCKED", "confirmed": False,
+               "calibration_authority": False, "calibration_profile_status": profile_status,
+               "reason": "calibration authority requested but profile does not match the active model, revision, language pair, or mode"}
+        )
     if not alignment_evidence:
         return LinguisticDecision(
             **{**base.__dict__, "status": "ALIGNER_NOT_APPLICABLE", "confirmed": False,
+               "calibration_authority": calibrated, "calibration_profile_status": profile_status,
                "reason": "no independent alignment family is available; candidate is held"}
         )
     target_score = float(alignment_evidence.get("target_score", (alignment_evidence.get("target") or {}).get("score", 0.0)) or 0.0)
@@ -293,6 +391,7 @@ def apply_independent_evidence(
                 **{**base.__dict__, "status": "ALIGNMENT_UNCERTAIN", "expected_alignment_score": target_score,
                    "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
                    "evidence_records": records, "evidence_families": families,
+                   "calibration_authority": calibrated, "calibration_profile_status": profile_status,
                    "reason": "independent evidence belongs to a different audio artifact"}
             )
     independent_alignment = any(family in {"CTC_FORCED_ALIGNER", "KALDI_FORCED_ALIGNER"} for family in families)
@@ -305,7 +404,20 @@ def apply_independent_evidence(
             **{**base.__dict__, "status": "ALIGNMENT_UNCERTAIN", "expected_alignment_score": target_score,
                "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
                "evidence_records": records, "evidence_families": families,
+               "calibration_authority": calibrated, "calibration_profile_status": profile_status,
                "reason": "at least two independent evidence families are required for a hard linguistic verdict"}
+        )
+
+    # An explicitly requested but non-matching profile is a configuration
+    # block, never permission to use the default .65 score as authority.
+    if calibration_authority and not calibrated:
+        return LinguisticDecision(
+            **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": target_score,
+               "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
+               "final_anchor_present": bool(final_anchor) if final_anchor is not None else base.final_anchor_present,
+               "evidence_records": records, "evidence_families": families,
+               "calibration_authority": False, "calibration_profile_status": profile_status,
+               "reason": "calibration authority requested but profile does not match the active model, revision, language pair, or mode"}
         )
 
     lid_language = _language_code((lid_evidence or {}).get("language", ""))
@@ -325,31 +437,50 @@ def apply_independent_evidence(
     whisper_source = (
         _language_code(base.detected_language) == source_code
         and float(base.language_probability or 0.0) >= .70
-    ) or base.status == "LANGUAGE_LEAK_SUSPECTED"
+    ) or base.status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION"}
     target_alignment_wins = target_score >= min_target_score
     target_alignment_weak = target_score < min_target_score
 
-    if whisper_source and target_alignment_weak and independent_source_lid:
-        status: LinguisticStatus = "LANGUAGE_LEAK_CONFIRMED"
-        reason = "Whisper and independent LID favor source language while target CTC is weak"
-    elif whisper_source and target_alignment_weak:
-        status = "LANGUAGE_LEAK_SUSPECTED"
-        reason = "Whisper favors source language and target CTC is weak; independent LID is absent or inconclusive"
+    if not calibrated:
+        if whisper_source and target_alignment_wins:
+            # A high target score cannot overwrite source-language evidence
+            # until that score has a matched calibration profile.
+            status: LinguisticStatus = "EVIDENCE_CONFLICT"
+            reason = "Whisper favors source language while uncalibrated target CTC appears strong; evidence is held"
+        elif whisper_source and target_alignment_weak and independent_source_lid:
+            status = "LANGUAGE_LEAK_STRONG_SUSPICION"
+            reason = "Whisper and independent LID favor source language while target CTC is weak; calibration is required"
+        elif whisper_source and target_alignment_weak:
+            status = "LANGUAGE_LEAK_STRONG_SUSPICION"
+            reason = "Whisper favors source language and target CTC is weak; calibration is required before confirmation"
+        elif target_alignment_wins:
+            status = "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT" if base.status == "PASS_SCREENED" else "TARGET_ALIGNMENT_SUPPORT"
+            reason = "uncalibrated target-only CTC supports the target phonetically; production eligibility remains blocked"
+        elif target_score < (min_target_score - .15):
+            status = "LEXICAL_FAILURE_SUSPECTED"
+            reason = "target-only alignment is weak; calibration is required before a lexical failure is confirmed"
+        else:
+            status = "TARGET_ALIGNMENT_WEAK"
+            reason = "target-only alignment is below threshold; result is diagnostic-only until calibration"
+    elif whisper_source and target_alignment_weak and independent_source_lid:
+        status = "LANGUAGE_LEAK_CONFIRMED"
+        reason = "Whisper and independent LID favor source language while calibrated target CTC is weak"
     elif target_alignment_wins:
         status = "PASS_CONFIRMED" if base.status == "PASS_SCREENED" else "PASS_PHONETIC"
-        reason = "target-only CTC/Kaldi alignment supports target phonetic content; cross-language margin is diagnostic"
+        reason = "calibrated target-only CTC supports target phonetic content; cross-language margin is diagnostic"
     elif target_score < (min_target_score - .15):
-        status = "LEXICAL_FAILURE_SUSPECTED"
-        reason = "target-only alignment is weak; calibration is required before a lexical failure is confirmed"
+        status = "LEXICAL_FAILURE_CONFIRMED"
+        reason = "calibrated target-only alignment rejects the target content"
     else:
         status = "ALIGNMENT_UNCERTAIN"
-        reason = "contrastive target/source alignment margin is inconclusive"
+        reason = "calibrated target alignment is inconclusive"
     return LinguisticDecision(
         **{**base.__dict__, "status": status, "expected_alignment_score": target_score,
            "source_alignment_score": source_score, "alignment_margin": margin, "cross_language_margin": margin,
            "final_anchor_present": bool(final_anchor) if final_anchor is not None else base.final_anchor_present,
            "evidence_records": records, "evidence_families": families,
-           "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED"},
+           "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
+           "calibration_authority": calibrated, "calibration_profile_status": profile_status,
            "reason": reason}
     )
 
@@ -378,7 +509,12 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           lid_evidence: Mapping[str, Any] | None = None,
                           alignment_min_target_score: float = .65,
                           alignment_min_margin: float = .20,
-                          alignment_source_leak_score: float = .75) -> QAResultV2:
+                          alignment_source_leak_score: float = .75,
+                          calibration_authority: bool = False,
+                          calibration_profile: Mapping[str, Any] | None = None,
+                          model_id: str | None = None,
+                          model_revision: str | None = None,
+                          performance_mode: str | None = None) -> QAResultV2:
     profile = profile or LanguageProfile()
     gates: dict[str, GateEvidence] = {}
     diagnostics: dict[str, Any] = {}
@@ -446,6 +582,11 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                 source_leak_score=alignment_source_leak_score,
                 target_language=target_language,
                 source_language=profile.source_language,
+                calibration_authority=calibration_authority,
+                calibration_profile=calibration_profile,
+                model_id=model_id,
+                model_revision=model_revision,
+                performance_mode=performance_mode,
             )
         forced_text = lexical_decision.forced_transcript or ""
         automatic_text = lexical_decision.automatic_transcript or ""
@@ -459,19 +600,43 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
             profile,
         )
         evidence_hash = lexical_decision.evidence_hashes[0] if lexical_decision.evidence_hashes else None
-        alignment_confirms_content = lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.expected_alignment_score is not None and lexical_decision.expected_alignment_score >= alignment_min_target_score
+        alignment_calibrated = bool(
+            lexical_decision.calibration_authority
+            and lexical_decision.calibration_profile_status == "MATCHED"
+        )
+        alignment_confirms_content = alignment_calibrated and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.expected_alignment_score is not None and lexical_decision.expected_alignment_score >= alignment_min_target_score
         # A CTC score may rescue a Whisper lexical miss, but it may not
         # silently certify an absent final-word anchor.  ``None`` remains
         # unknown and therefore keeps the hard final-word gate closed.
         alignment_confirms_final = alignment_confirms_content and lexical_decision.final_anchor_present is True
         gates["content"] = _gate("content", GateStatus.PASS if (forced_content_ok or alignment_confirms_content) else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_content}, evidence_hash=evidence_hash)
         gates["final_word"] = _gate("final_word", GateStatus.PASS if (forced_final_ok or alignment_confirms_final) else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_final}, evidence_hash=evidence_hash)
-        alignment_overrides_whisper_leak = bool(
-            alignment_confirms_content
+        independent_source_lid = bool(
+            lid_evidence
+            and str((lid_evidence.get("record") or {}).get("evidence_family", "")) == "AUDIO_LANGUAGE_ID"
+            and _language_code(lid_evidence.get("language")) == _language_code(profile.source_language)
+            and float(lid_evidence.get("probability", 0.0) or 0.0) >= .70
         )
+        independent_target_lid = bool(
+            lid_evidence
+            and str((lid_evidence.get("record") or {}).get("evidence_family", "")) == "AUDIO_LANGUAGE_ID"
+            and _language_code(lid_evidence.get("language")) == _language_code(profile.target_language)
+            and float(lid_evidence.get("probability", 0.0) or 0.0) >= .70
+        )
+        # Before calibration, a target score can never override a source
+        # language gate.  Even after calibration, the override needs a final
+        # anchor and independent LID that does not favour the source.
+        alignment_overrides_whisper_leak = bool(
+            alignment_calibrated
+            and alignment_confirms_final
+            and independent_target_lid
+            and not independent_source_lid
+            and lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"}
+        )
+        source_conflict = lexical_decision.status == "EVIDENCE_CONFLICT"
         gates["source_language"] = _gate(
             "source_language",
-            GateStatus.PASS if (leak_ok or alignment_overrides_whisper_leak) else GateStatus.FAIL,
+            GateStatus.PASS if ((leak_ok and not source_conflict) or alignment_overrides_whisper_leak) else GateStatus.FAIL,
             details={**leak_details, "linguistic_status": lexical_decision.status, "automatic_transcript": automatic_text, "alignment_overrode_whisper_leak": alignment_overrides_whisper_leak},
             evidence_hash=evidence_hash,
         )
@@ -513,9 +678,15 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
         # Uncertainty is a hold/review state, never an implicit PASS and never
         # a reason for the cohort scheduler to regenerate the line.
         passed = False
-    if lexical_decision is not None and lexical_decision.status in {"ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "ALIGNER_NOT_APPLICABLE", "HUMAN_REVIEW"}:
+    if lexical_decision is not None and lexical_decision.status in {
+        "ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED",
+        "LANGUAGE_LEAK_STRONG_SUSPICION", "LEXICAL_FAILURE_SUSPECTED",
+        "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK",
+        "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT", "EVIDENCE_CONFLICT",
+        "ALIGNER_NOT_APPLICABLE", "HUMAN_REVIEW", "BLOCKED",
+    }:
         failure = FailureClass.ASR_UNCERTAIN
-    elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_SUSPECTED"}:
+    elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"}:
         failure = FailureClass.STOCHASTIC_TTS
     else:
         failure = _failure_for(failures[0]) if failures else None
@@ -540,8 +711,11 @@ def linguistic_status(result: QAResultV2) -> str | None:
 
 def is_provisional_result(result: QAResultV2) -> bool:
     return linguistic_status(result) in {
-        "PASS_SCREENED", "ASR_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED",
-        "ALIGNMENT_UNCERTAIN", "ALIGNER_NOT_APPLICABLE",
+        "PASS_SCREENED", "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT",
+        "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK",
+        "LEXICAL_FAILURE_SUSPECTED", "ASR_UNCERTAIN",
+        "LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION",
+        "EVIDENCE_CONFLICT", "ALIGNMENT_UNCERTAIN", "ALIGNER_NOT_APPLICABLE",
     }
 
 
@@ -554,7 +728,7 @@ def rank_provisional_v2(result: QAResultV2) -> float:
         return float("-inf")
     status = linguistic_status(result)
     score = 0.0
-    score += 3.0 if status == "PASS_SCREENED" else 1.0
+    score += 3.0 if status in {"PASS_SCREENED", "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT"} else 1.0
     score += 1.5 if result.gates.get("final_word", _gate("final_word", GateStatus.NOT_RUN)).status is GateStatus.PASS else 0.0
     score += 1.5 if result.gates.get("content", _gate("content", GateStatus.NOT_RUN)).status is GateStatus.PASS else 0.0
     score += float(result.diagnostics.get("linguistic_decision", {}).get("word_coverage") or 0.0)
@@ -568,7 +742,7 @@ def select_passed_v2(evaluations: Sequence[tuple[Any, QAResultV2]]) -> tuple[Any
 
 __all__ = [
     "LanguageProfile", "LinguisticDecision", "LinguisticStatus", "QAResultV2",
-    "apply_independent_evidence", "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word",
+    "apply_independent_evidence", "calibration_profile_status", "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word",
     "is_provisional_result", "linguistic_status", "ordered_content", "rank_provisional_v2",
     "select_passed_v2", "source_language_leak",
 ]

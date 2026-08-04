@@ -35,6 +35,11 @@ class QAConfig:
     alignment_min_target_score: float = .65
     alignment_min_margin: float = .20
     alignment_source_leak_score: float = .75
+    # Acoustic thresholds are diagnostic until a gold-set calibration profile
+    # is explicitly enabled and matches the active aligner/runtime identity.
+    calibration_authority: bool = False
+    calibration_profile: dict[str, Any] = field(default_factory=dict)
+    performance_mode: str = "NEUTRAL"
     english_markers: list[str] = field(default_factory=lambda: [
         "the", "you", "what", "why", "yes", "no", "not", "are", "is",
         "can", "will", "this", "that", "your", "to", "of", "and",

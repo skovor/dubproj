@@ -20,7 +20,7 @@ from dubbing_pipeline.asr import ASRCache, prepare_whisperx_escalation, transcri
 from dubbing_pipeline.qa_v2 import LanguageProfile, apply_independent_evidence, decide_linguistic_evidence, evaluate_candidate_v2, final_word, ordered_content, source_language_leak
 from dubbing_pipeline.scheduler import run_cohorts
 from dubbing_pipeline.telemetry import TelemetryCollector
-from dubbing_pipeline.config import PipelineConfig
+from dubbing_pipeline.config import PipelineConfig, QAConfig
 from dubbing_pipeline.generation_v2 import GenerationRuntimeV2
 from dubbing_pipeline.generation_v2 import GenerationRequest
 from dubbing_pipeline.models import Scene
@@ -183,10 +183,11 @@ class V2QATests(unittest.TestCase):
                 "evidence_records": [{"evidence_id": "c", "evidence_family": "CTC_FORCED_ALIGNER", "backend_id": "test-ctc", "model_id": "de", "model_revision": "1", "mode": "expected_text_alignment", "audio_sha256": "d" * 64, "semantic_key": None, "output": {"score": .90}, "confidence": .90, "evidence_hash": "c" * 64}],
             }
             result = evaluate_candidate_v2(str(path), expected_text="Keine Sorge", source_text="Don't worry", target_sample_rate=24000, target_frames=2400, linguistic_evidence=evidence, alignment_evidence=alignment)
-            self.assertTrue(result.passed)
-            self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "PASS_PHONETIC")
+            self.assertFalse(result.passed)
+            self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "TARGET_ALIGNMENT_SUPPORT")
             self.assertEqual(result.diagnostics["linguistic_decision"]["evidence_families"], ["CTC_FORCED_ALIGNER", "WHISPER_ASR"])
             self.assertEqual(result.diagnostics["linguistic_decision"]["cross_language_margin"], .80)
+            self.assertEqual(result.failure_class.value, "ASR_UNCERTAIN")
 
     def test_ctc_target_can_overrule_whisper_language_misread(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -206,9 +207,10 @@ class V2QATests(unittest.TestCase):
                 "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}],
             }
             result = evaluate_candidate_v2(str(path), expected_text="Keine Sorge", source_text="Don't worry", target_sample_rate=24000, target_frames=2400, linguistic_evidence=evidence, alignment_evidence=alignment)
-            self.assertTrue(result.passed)
-            self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "PASS_PHONETIC")
-            self.assertEqual(result.gates["source_language"].status, GateStatus.PASS)
+            self.assertFalse(result.passed)
+            self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "EVIDENCE_CONFLICT")
+            self.assertEqual(result.gates["source_language"].status, GateStatus.FAIL)
+            self.assertFalse(result.diagnostics["linguistic_decision"]["calibration_authority"])
 
     def test_cross_language_ctc_margin_is_diagnostic_only(self):
         base = decide_linguistic_evidence(
@@ -219,8 +221,61 @@ class V2QATests(unittest.TestCase):
             base,
             {"target_score": .90, "source_score": .90, "margin": 0.0, "target": {"score": .90, "final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
         )
-        self.assertEqual(result.status, "PASS_CONFIRMED")
+        self.assertEqual(result.status, "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT")
         self.assertEqual(result.cross_language_margin, 0.0)
+
+    def test_uncalibrated_target_score_never_emits_hard_pass(self):
+        base = decide_linguistic_evidence(
+            "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+            automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+        )
+        decision = apply_independent_evidence(
+            base,
+            {"target_score": .95, "source_score": .10, "target": {"final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+        )
+        self.assertEqual(decision.status, "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT")
+        self.assertFalse(decision.confirmed)
+        self.assertFalse(decision.calibration_authority)
+
+    def test_mismatched_calibration_profile_is_blocked(self):
+        base = decide_linguistic_evidence(
+            "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+            automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+        )
+        decision = apply_independent_evidence(
+            base,
+            {"target_score": .95, "source_score": .10, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+            calibration_authority=True,
+            calibration_profile={
+                "schema": "generic-dubbing-calibration-profile-v1", "authority": True,
+                "model_id": "fake-german", "model_revision": "wrong-revision",
+                "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL",
+            },
+            model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertEqual(decision.calibration_profile_status, "BLOCKED_IDENTITY_MISMATCH")
+        self.assertFalse(decision.confirmed)
+
+    def test_matching_calibration_profile_can_confirm(self):
+        base = decide_linguistic_evidence(
+            "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
+            automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
+        )
+        decision = apply_independent_evidence(
+            base,
+            {"target_score": .95, "source_score": .10, "target": {"final_anchor_present": True}, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]},
+            calibration_authority=True,
+            calibration_profile={
+                "schema": "generic-dubbing-calibration-profile-v1", "authority": True,
+                "model_id": "fake-german", "model_revision": "test",
+                "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL",
+            },
+            model_id="fake-german", model_revision="test", performance_mode="NEUTRAL",
+        )
+        self.assertEqual(decision.status, "PASS_CONFIRMED")
+        self.assertTrue(decision.confirmed)
+        self.assertEqual(decision.calibration_profile_status, "MATCHED")
 
     def test_alignment_score_without_whisper_family_cannot_hard_confirm(self):
         base = decide_linguistic_evidence(
@@ -275,9 +330,11 @@ class V2QATests(unittest.TestCase):
         )
         alignment = {"target_score": .20, "source_score": .90, "margin": -.70, "evidence_records": [{"evidence_family": "CTC_FORCED_ALIGNER"}]}
         suspected = apply_independent_evidence(base, alignment, source_language="en")
-        self.assertEqual(suspected.status, "LANGUAGE_LEAK_SUSPECTED")
+        self.assertEqual(suspected.status, "LANGUAGE_LEAK_STRONG_SUSPICION")
+        self.assertFalse(suspected.confirmed)
         confirmed = apply_independent_evidence(base, alignment, lid_evidence={"language": "en", "probability": .95, "record": {"evidence_family": "AUDIO_LANGUAGE_ID"}}, source_language="en")
-        self.assertEqual(confirmed.status, "LANGUAGE_LEAK_CONFIRMED")
+        self.assertEqual(confirmed.status, "LANGUAGE_LEAK_STRONG_SUSPICION")
+        self.assertFalse(confirmed.confirmed)
 
     def test_ctc_rejects_target_without_inventing_source_leak(self):
         base = decide_linguistic_evidence(
@@ -290,6 +347,7 @@ class V2QATests(unittest.TestCase):
             source_language="en",
         )
         self.assertEqual(result.status, "LEXICAL_FAILURE_SUSPECTED")
+        self.assertFalse(result.confirmed)
 
     def test_missing_alignment_family_is_a_hold(self):
         base = decide_linguistic_evidence(
@@ -439,6 +497,17 @@ class V2SchedulerTests(unittest.TestCase):
         def align(self, _path, *, text, language):
             return {"score": .90 if language == "de" else .10, "coverage": 1.0, "final_anchor_present": True, "words": [{"word": token, "score": .9} for token in text.split()]}
 
+    @staticmethod
+    def _calibrated_qa() -> QAConfig:
+        return QAConfig(
+            calibration_authority=True,
+            calibration_profile={
+                "schema": "generic-dubbing-calibration-profile-v1", "authority": True,
+                "model_id": "fake-german", "model_revision": "test",
+                "target_language": "de", "source_language": "en", "performance_mode": "NEUTRAL",
+            },
+        )
+
     def test_qa_is_after_initial_cohort(self):
         order = []; telemetry = TelemetryCollector("test-run")
         items = ["a", "b", "c"]
@@ -464,6 +533,19 @@ class V2SchedulerTests(unittest.TestCase):
         self.assertEqual(report.retry_ids, [])
         self.assertEqual(report.blockers[0]["reason"], "ASR_UNCERTAIN_HOLD")
 
+    def test_lexical_suspicion_is_held_without_regeneration(self):
+        class Result:
+            passed = False
+            failure_class = __import__("dubbing_pipeline.contracts", fromlist=["FailureClass"]).FailureClass.ASR_UNCERTAIN
+        generated = []
+        def generate(values, round_index):
+            generated.append(round_index)
+            return {value: [value] for value in values}
+        report = run_cohorts(["lexical-suspect"], item_id=lambda value: value, generate=generate, evaluate=lambda _value: Result())
+        self.assertEqual(generated, [1])
+        self.assertEqual(report.retry_ids, [])
+        self.assertEqual(report.blockers[0]["reason"], "ASR_UNCERTAIN_HOLD")
+
     def test_fmv_scene_uses_surgical_mount(self):
         import soundfile as sf
         class Backend:
@@ -476,7 +558,7 @@ class V2SchedulerTests(unittest.TestCase):
             root = Path(directory); ref = root / "ref.wav"; stem = root / "stem.wav"
             sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
             original = np.column_stack([np.ones(24000, dtype="float32") * .02, np.ones(24000, dtype="float32") * .07]); sf.write(stem, original, 24000)
-            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=1, retry_takes=0)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=1, retry_takes=0, qa=self._calibrated_qa())
             line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
             report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=self.FakeCTC())
             self.assertTrue(report["pass"]); self.assertTrue(Path(report["mounted_output"]).is_file())
@@ -497,7 +579,7 @@ class V2SchedulerTests(unittest.TestCase):
             root = Path(directory); ref = root / "ref.wav"; stem = root / "stem.wav"
             sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
             original = np.column_stack([np.ones(24000, dtype="float32") * .02, np.ones(24000, dtype="float32") * .07]); sf.write(stem, original, 24000)
-            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", fmv_initial_takes=2, fmv_retry_takes=0, seed=11)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", fmv_initial_takes=2, fmv_retry_takes=0, seed=11, qa=self._calibrated_qa())
             line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
             report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=self.FakeCTC())
             self.assertTrue(report["pass"], report)
@@ -529,7 +611,7 @@ class V2SchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); ref = root / "ref.wav"
             sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
-            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=2, retry_takes=0, seed=11)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=2, retry_takes=0, seed=11, qa=self._calibrated_qa())
             line = Line("L1", "A", "Hello", "Hallo", 0, 1, topology="LINE_SEPARATED", subtitle_authorized=True, reference_audio=str(ref))
             report = run_scene_v2(Scene("S", "LINE_SEPARATED", [line]), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=SelectiveCTC())
             self.assertTrue(report["pass"], report)

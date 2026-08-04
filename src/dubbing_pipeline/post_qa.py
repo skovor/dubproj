@@ -103,6 +103,11 @@ def audit_candidate_stage(
     alignment_min_target_score: float = .65,
     alignment_min_margin: float = .20,
     alignment_source_leak_score: float = .75,
+    calibration_authority: bool = False,
+    calibration_profile: Mapping[str, Any] | None = None,
+    model_id: str | None = None,
+    model_revision: str | None = None,
+    performance_mode: str | None = None,
 ) -> StageAudit:
     """Run the normal candidate QA against a persisted artifact.
 
@@ -139,6 +144,11 @@ def audit_candidate_stage(
             alignment_min_target_score=alignment_min_target_score,
             alignment_min_margin=alignment_min_margin,
             alignment_source_leak_score=alignment_source_leak_score,
+            calibration_authority=calibration_authority,
+            calibration_profile=calibration_profile,
+            model_id=model_id,
+            model_revision=model_revision,
+            performance_mode=performance_mode,
         )
         artifact_sha = sha256_file(path)
         qa_hash = contract_hash(

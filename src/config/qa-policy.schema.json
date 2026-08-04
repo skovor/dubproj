@@ -20,9 +20,12 @@
       },
       "additionalProperties": false
     },
+    "calibration_authority": {"type": "boolean"},
+    "calibration_profile": {"type": "object", "additionalProperties": true},
+    "performance_mode": {"type": "string", "minLength": 1},
     "statuses": {
       "type": "array",
-      "items": {"enum": ["PASS_SCREENED", "PASS_CONFIRMED", "PASS_PHONETIC", "ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_SUSPECTED", "PERFORMANCE_UNCERTAIN", "HUMAN_REVIEW", "ALIGNER_NOT_APPLICABLE"]},
+      "items": {"enum": ["PASS_SCREENED", "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT", "PASS_CONFIRMED", "PASS_PHONETIC", "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK", "EVIDENCE_CONFLICT", "ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_SUSPECTED", "LEXICAL_FAILURE_CONFIRMED", "PERFORMANCE_UNCERTAIN", "HUMAN_REVIEW", "ALIGNER_NOT_APPLICABLE", "BLOCKED"]},
       "uniqueItems": true
     }
   },

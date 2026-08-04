@@ -102,6 +102,17 @@ def _profile(config: Any, supplied: LanguageProfile | None) -> LanguageProfile:
     )
 
 
+def _calibration_kwargs(config: Any, alignment_backend: Any) -> dict[str, Any]:
+    """Bind QA authority to the exact active alignment runtime identity."""
+    return {
+        "calibration_authority": bool(getattr(config.qa, "calibration_authority", False)),
+        "calibration_profile": getattr(config.qa, "calibration_profile", None),
+        "model_id": str(getattr(alignment_backend, "model_id", "unknown")) if alignment_backend is not None else None,
+        "model_revision": str(getattr(alignment_backend, "model_revision", "unknown")) if alignment_backend is not None else None,
+        "performance_mode": str(getattr(config.qa, "performance_mode", "NEUTRAL")),
+    }
+
+
 def _result_or_failed(audit: StageAudit) -> QAResultV2:
     if audit.result is not None:
         return audit.result
@@ -151,12 +162,18 @@ def _line_linguistic_summary(row: dict[str, Any], options: list[dict[str, Any]],
             "expected_alignment_score": decision.get("expected_alignment_score"),
             "source_alignment_score": decision.get("source_alignment_score"),
             "alignment_margin": decision.get("alignment_margin"),
+            "calibration_authority": decision.get("calibration_authority", False),
+            "calibration_profile_status": decision.get("calibration_profile_status", "DISABLED"),
             "missing_tokens": decision.get("missing_tokens", []),
             "final_anchor_present": decision.get("final_anchor_present"),
             "reason": decision.get("reason", ""),
         }
         decisions.append(item)
-        if raw_decision.get("status") in {"ASR_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "ALIGNMENT_UNCERTAIN", "ALIGNER_NOT_APPLICABLE"}:
+        if raw_decision.get("status") in {
+            "ASR_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION",
+            "LEXICAL_FAILURE_SUSPECTED", "ALIGNMENT_UNCERTAIN", "ALIGNER_NOT_APPLICABLE",
+            "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK", "EVIDENCE_CONFLICT",
+        }:
             evidence = raw.diagnostics.get("asr", {}) if raw is not None else {}
             escalations.append(prepare_whisperx_escalation(
                 raw.artifact_path if raw is not None and raw.artifact_path else "",
@@ -640,6 +657,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     alignment_min_target_score=float(getattr(config.qa, "alignment_min_target_score", .65)),
                     alignment_min_margin=float(getattr(config.qa, "alignment_min_margin", .20)),
                     alignment_source_leak_score=float(getattr(config.qa, "alignment_source_leak_score", .75)),
+                    **_calibration_kwargs(config, alignment_backend),
                 )
                 option["mounted_audit"] = regraded
                 option["alignment"] = alignment_dict
@@ -671,6 +689,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         alignment_min_target_score=float(getattr(config.qa, "alignment_min_target_score", .65)),
                         alignment_min_margin=float(getattr(config.qa, "alignment_min_margin", .20)),
                         alignment_source_leak_score=float(getattr(config.qa, "alignment_source_leak_score", .75)),
+                        **_calibration_kwargs(config, alignment_backend),
                     )
                 option["eligible"] = bool(regraded.passed and option["serialized_audit"].passed)
                 if option["eligible"]:

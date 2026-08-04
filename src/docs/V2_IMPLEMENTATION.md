@@ -34,6 +34,11 @@ hash-only baseline in the external sandbox.
   they cannot confirm a German pass or an English leak because separate
   language models are not calibrated onto one score scale. English leakage
   requires source-favoring Whisper plus independent LID and weak target CTC.
+  Until a gold-set profile is explicitly authorized and matches the active
+  aligner model/revision/language pair/performance mode, target alignment can
+  emit only diagnostic support, weak, conflict, or strong-suspicion states;
+  those states are held as `ASR_UNCERTAIN` and cannot pass or trigger a retry.
+  A mismatched requested profile is `BLOCKED`, never an implicit fallback.
 - `post_qa.py` makes the delivery boundary explicit: every raw candidate is
   re-audited after processing, after surgical mounting, and after reopening
   the serialized artifact. FMV scenes receive a final full-scene audit that

@@ -44,6 +44,9 @@
     "max_lufs_delta": 3.5,
     "max_splice_speech_onset_error_ms": 60.0,
     "max_seam_notch_db": 12.0,
+    "calibration_authority": false,
+    "calibration_profile": {},
+    "performance_mode": "NEUTRAL",
     "english_markers": ["the", "you", "what", "why", "yes", "no", "not", "are", "is", "can", "will", "this", "that", "your", "to", "of", "and"],
     "strong_source_words": []
   }
