@@ -1,0 +1,26 @@
+from __future__ import annotations
+import hashlib, tempfile, unittest
+from pathlib import Path
+from dubbing_pipeline.calibration import TARGET_FEATURES, FeatureRow, train_calibrator
+from dubbing_pipeline.calibration.promote import PromotionError, promote_profile
+from dubbing_pipeline.calibration.validate import ValidationReport, evaluate
+
+def row(i, label, split): return FeatureRow(f"c{i}", split, f"g{i}", label, {name: (3.0 if label else -3.0) for name in TARGET_FEATURES})
+
+class PromotionTests(unittest.TestCase):
+    def test_hidden_false_pass_blocks(self):
+        artifact = train_calibrator([row(1, 1, "calibration"), row(2, 0, "calibration")], kind="target", features=TARGET_FEATURES, dataset_sha256="x")
+        hidden = ValidationReport("hidden_test", 1, .5, .5, 1, 0, ({"clip_id":"c3","label":0,"probability":.9},), "hidden-1")
+        with self.assertRaises(PromotionError):
+            promote_profile(profile_id="x", target_artifact={**artifact.to_dict(), "artifact_path": "x", "artifact_sha256": "a" * 64}, validation=evaluate(artifact, [row(4, 1, "validation")], split="validation"), hidden=hidden, dataset_files={}, identity={"backend_id":"b","model_id":"m","model_revision":"r","feature_schema_version":"char-alignment-v2","target_language":"de","source_language":"en"}, thresholds={"target_pass_probability":.8,"target_failure_probability":.2,"final_anchor_pass_probability":.8,"source_lid_probability":.8}, provenance={"code_commit":"c","runtime_lock_sha256":"0"*64,"models_lock_sha256":"0"*64}, output="x")
+    def test_dataset_hashes_are_recomputed(self):
+        artifact = train_calibrator([row(1, 1, "calibration"), row(2, 0, "calibration")], kind="target", features=TARGET_FEATURES, dataset_sha256="x")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); artifact_file = root / "artifact.json"; artifact_file.write_text("{}", encoding="utf-8"); sha = hashlib.sha256(artifact_file.read_bytes()).hexdigest(); files = {}
+            for name in ("manifest_sha256", "labels_sha256", "split_manifest_sha256"): files[name] = root / f"{name}.json"; files[name].write_text(name, encoding="utf-8")
+            valid = evaluate(artifact, [row(3, 1, "validation")], split="validation")
+            hidden = evaluate(artifact, [row(4, 1, "hidden_test")], split="hidden_test", run_id="h1")
+            profile = promote_profile(profile_id="x", target_artifact={**artifact.to_dict(), "artifact_path": str(artifact_file), "artifact_sha256": sha}, validation=valid, hidden=hidden, dataset_files=files, identity={"backend_id":"b","model_id":"m","model_revision":"r","feature_schema_version":"char-alignment-v2","target_language":"de","source_language":"en","performance_modes":["NEUTRAL"]}, thresholds={"target_pass_probability":.8,"target_failure_probability":.2,"final_anchor_pass_probability":.8,"source_lid_probability":.8}, provenance={"code_commit":"c","runtime_lock_sha256":"0"*64,"models_lock_sha256":"0"*64}, output=root/"profile.json")
+            self.assertEqual(profile["status"], "VALIDATED"); self.assertEqual(profile["dataset"]["manifest_sha256"], hashlib.sha256(b"manifest_sha256").hexdigest())
+
+if __name__ == "__main__": unittest.main()
