@@ -4,7 +4,19 @@ import json
 
 from dubbing_pipeline.config import PipelineConfig
 from dubbing_pipeline.asr import ASRCache
-from dubbing_pipeline.runtime_lock import collect_runtime_lock, lock_digest, validate_models_lock, validate_runtime_lock
+from dubbing_pipeline.runtime_lock import (
+    MODELS_LOCK_SCHEMA,
+    RUNTIME_LOCK_SCHEMA,
+    aggregate_model_sha256,
+    assert_backend_matches_lock,
+    collect_runtime_lock,
+    compare_runtime_snapshot,
+    lock_digest,
+    model_file_entry,
+    validate_models_lock,
+    validate_runtime_lock,
+    verify_model_files,
+)
 from dubbing_pipeline.models import Line
 from dubbing_pipeline.package import PackageFile
 from dubbing_pipeline.policy import KEEP_ORIGINAL, SHORT_TTS_QA, TTS, append_ellipsis, classify_line
@@ -61,8 +73,66 @@ def test_unprovisioned_lock_is_visible_in_lab_but_blocks_production():
 def test_runtime_and_model_lock_contracts_reject_unknowns():
     runtime = collect_runtime_lock()
     assert validate_runtime_lock(runtime, strict=False) == []
-    assert validate_runtime_lock({"schema": "generic-dubbing-runtime-lock-v1", "status": "UNPROVISIONED", "environment": {}, "dependencies": {}}, strict=True)
-    assert validate_models_lock({"schema": "generic-dubbing-model-lock-v1", "status": "UNPROVISIONED", "models": [{"model_id": "m", "revision": None, "sha256": None, "language": "de", "sample_rate": 24000, "backend": "b", "backend_version": None, "files": []}]}, strict=True)
+    assert validate_runtime_lock({"schema": RUNTIME_LOCK_SCHEMA, "status": "UNPROVISIONED", "environment": {}, "dependencies": {}}, strict=True)
+    assert validate_models_lock({"schema": MODELS_LOCK_SCHEMA, "status": "UNPROVISIONED", "models": [{"model_id": "m", "revision": None, "sha256": None, "language": "de", "sample_rate": 24000, "backend": "b", "backend_id": "b", "backend_version": None, "files": []}]}, strict=True)
+
+
+def test_not_installed_component_cannot_be_complete():
+    runtime = collect_runtime_lock(device="cpu", capabilities={"mfa_fallback": {"enabled": False, "requires": ["mfa"]}})
+    runtime["status"] = "COMPLETE"
+    runtime["components"]["mfa"] = {"status": "INSTALLED", "version": "not-installed"}
+    assert any("mfa" in item for item in validate_runtime_lock(runtime, strict=True, required_capabilities=runtime["capabilities"]))
+
+
+def test_disabled_optional_mfa_is_valid_but_enabled_missing_ctc_is_blocked():
+    disabled = collect_runtime_lock(device="cpu", capabilities={"mfa_fallback": {"enabled": False, "requires": ["mfa"]}})
+    assert disabled["status"] == "COMPLETE"
+    assert validate_runtime_lock(disabled, strict=True, required_capabilities=disabled["capabilities"]) == []
+    enabled = collect_runtime_lock(device="cpu", capabilities={"ctc_alignment": {"enabled": True, "requires": ["whisperx"]}})
+    assert enabled["status"] == "UNPROVISIONED"
+    assert any("whisperx" in item for item in validate_runtime_lock(enabled, strict=True, required_capabilities=enabled["capabilities"]))
+
+
+def test_model_bytes_and_aggregate_are_verified_after_freeze():
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        original = root / "old" / "model.bin"
+        original.parent.mkdir()
+        original.write_bytes(b"stable weights")
+        row = model_file_entry(original, logical_path="model.bin")
+        model = {"model_id": "model", "revision": "rev-1", "sha256": aggregate_model_sha256([row]), "language": "de", "sample_rate": 24000, "backend": "test", "backend_id": "test", "backend_version": "backend-1", "files": [row]}
+        lock = {"schema": MODELS_LOCK_SCHEMA, "status": "COMPLETE", "models_root": str(root), "models": [model]}
+        assert validate_models_lock(lock, strict=True) == []
+        assert verify_model_files(lock, base_dir=root, strict=True) == []
+        relocated = root / "model.bin"
+        original.replace(relocated)
+        assert verify_model_files(lock, base_dir=root, strict=True) == []
+        relocated.write_bytes(b"tampered weights")
+        assert any("SHA-256 changed" in item for item in verify_model_files(lock, base_dir=root, strict=True))
+
+
+def test_live_environment_mismatch_is_blocked():
+    runtime = collect_runtime_lock(device="cpu", capabilities={"mfa_fallback": {"enabled": False, "requires": ["mfa"]}})
+    runtime["status"] = "COMPLETE"
+    snapshot = json.loads(json.dumps(runtime))
+    snapshot["environment"]["python"] = "0.0.0"
+    errors, _warnings = compare_runtime_snapshot(runtime, snapshot)
+    assert any("python" in item for item in errors)
+
+
+def test_loaded_backend_revision_mismatch_is_blocked():
+    class Backend:
+        model_id = "model"
+        backend_id = "test-backend"
+        model_revision = "rev-b"
+        backend_version = "backend-1"
+    lock = {"schema": MODELS_LOCK_SCHEMA, "models": [{"model_id": "model", "revision": "rev-a", "backend_id": "test-backend", "backend_version": "backend-1"}]}
+    try:
+        assert_backend_matches_lock(Backend(), lock, role="test")
+    except ValueError as exc:
+        assert "revision" in str(exc)
+    else:
+        raise AssertionError("a loaded backend with a different revision must be blocked")
 
 
 def test_lock_digest_is_unicode_and_order_stable():

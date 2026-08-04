@@ -1,6 +1,6 @@
 {
-  "schema": "generic-dubbing-runtime-lock-v1",
-  "lock_version": 1,
+  "schema": "generic-dubbing-runtime-lock-v2",
+  "lock_version": 2,
   "status": "UNPROVISIONED",
   "generated_by": "scripts/freeze_runtime.py",
   "purpose": "Template only. Run freeze_runtime.py on the generation machine before any production run.",
@@ -8,22 +8,36 @@
     "python": null,
     "windows": null,
     "architecture": null,
-    "cuda": null,
-    "nvidia_driver": null
-  },
-  "dependencies": {
-    "python": null,
-    "windows": null,
-    "cuda": null,
+    "device": "cuda",
+    "torch_cuda_build": null,
+    "cuda_runtime": null,
     "nvidia_driver": null,
-    "pytorch": null,
-    "torchaudio": null,
-    "faster_whisper": null,
-    "ctranslate2": null,
-    "whisperx": null,
-    "speechbrain": null,
-    "mfa": null,
-    "ffmpeg": null,
-    "omnivoice": null
+    "gpu_name": null,
+    "gpu_uuid": null,
+    "compute_capability": null,
+    "vram_bytes": null
+  },
+  "components": {
+    "python": {"status": "UNKNOWN", "version": null},
+    "windows": {"status": "UNKNOWN", "version": null},
+    "cuda": {"status": "REQUIRED_BUT_MISSING", "version": null},
+    "nvidia_driver": {"status": "REQUIRED_BUT_MISSING", "version": null},
+    "pytorch": {"status": "UNKNOWN", "version": null},
+    "torchaudio": {"status": "UNKNOWN", "version": null},
+    "faster_whisper": {"status": "UNKNOWN", "version": null},
+    "ctranslate2": {"status": "UNKNOWN", "version": null},
+    "whisperx": {"status": "UNKNOWN", "version": null},
+    "speechbrain": {"status": "DISABLED_EXPLICITLY", "version": null},
+    "mfa": {"status": "DISABLED_EXPLICITLY", "version": null},
+    "ffmpeg": {"status": "UNKNOWN", "version": null},
+    "omnivoice": {"status": "REQUIRED_BUT_MISSING", "version": null}
+  },
+  "dependencies": {},
+  "capabilities": {
+    "generation": {"enabled": true, "requires": ["omnivoice", "pytorch", "torchaudio"]},
+    "asr_screening": {"enabled": true, "requires": ["faster_whisper", "ctranslate2"]},
+    "ctc_alignment": {"enabled": true, "requires": ["whisperx"]},
+    "independent_lid": {"enabled": false, "requires": ["speechbrain"]},
+    "mfa_fallback": {"enabled": false, "requires": ["mfa"]}
   }
 }

@@ -86,6 +86,13 @@ class PipelineConfig:
     reference_root: Path | None = None
     runtime_lock: Path | None = None
     models_lock: Path | None = None
+    capabilities: dict[str, dict[str, Any]] = field(default_factory=lambda: {
+        "generation": {"enabled": True, "requires": ["omnivoice", "pytorch", "torchaudio"]},
+        "asr_screening": {"enabled": True, "requires": ["faster_whisper", "ctranslate2"]},
+        "ctc_alignment": {"enabled": True, "requires": ["whisperx"]},
+        "independent_lid": {"enabled": False, "requires": ["speechbrain"]},
+        "mfa_fallback": {"enabled": False, "requires": ["mfa"]},
+    })
     lab_mode: bool = True
     sandbox_root: Path | None = None
     qa: QAConfig = field(default_factory=QAConfig)
@@ -115,7 +122,7 @@ class PipelineConfig:
             "fmv_initial_takes", "fmv_retry_takes", "append_ellipsis_experiment",
             "sample_rate", "native_sample_rate", "channels", "seed", "temperature", "t_shift", "postprocess_output", "text_normalization_version", "dialogue_channel", "ffmpeg", "vgmstream", "vgaudio",
             "runtime_root", "runtime_adapter", "reference_root", "lab_mode", "sandbox_root",
-            "runtime_lock", "models_lock",
+            "runtime_lock", "models_lock", "capabilities",
         }
         values = {key: raw.pop(key) for key in list(raw) if key in known}
         for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root", "runtime_lock", "models_lock"):

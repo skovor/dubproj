@@ -10,6 +10,13 @@
   "backend_version": "unknown",
   "runtime_lock": "runtime.lock.json",
   "models_lock": "models.lock.json",
+  "capabilities": {
+    "generation": {"enabled": true, "requires": ["omnivoice", "pytorch", "torchaudio"]},
+    "asr_screening": {"enabled": true, "requires": ["faster_whisper", "ctranslate2"]},
+    "ctc_alignment": {"enabled": true, "requires": ["whisperx"]},
+    "independent_lid": {"enabled": false, "requires": ["speechbrain"]},
+    "mfa_fallback": {"enabled": false, "requires": ["mfa"]}
+  },
   "device": "cuda",
   "dtype": "float16",
   "generation_steps": 32,

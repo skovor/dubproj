@@ -1,9 +1,10 @@
 {
-  "schema": "generic-dubbing-model-lock-v1",
-  "lock_version": 1,
+  "schema": "generic-dubbing-model-lock-v2",
+  "lock_version": 2,
   "status": "UNPROVISIONED",
   "generated_by": "scripts/freeze_runtime.py",
   "purpose": "Template only. Every revision and model-file SHA-256 must be supplied before production.",
+  "models_root": "models",
   "models": [
     {
       "model_id": "k2-fsa/OmniVoice",
@@ -12,6 +13,18 @@
       "language": "de",
       "sample_rate": 24000,
       "backend": "omnivoice",
+      "backend_id": "omnivoice",
+      "backend_version": null,
+      "files": []
+    },
+    {
+      "model_id": "large-v3-turbo",
+      "revision": null,
+      "sha256": null,
+      "language": "multilingual",
+      "sample_rate": 16000,
+      "backend": "faster-whisper",
+      "backend_id": "faster-whisper-large-v3-turbo",
       "backend_version": null,
       "files": []
     },
@@ -22,6 +35,7 @@
       "language": "de",
       "sample_rate": 16000,
       "backend": "whisperx",
+      "backend_id": "whisperx-align",
       "backend_version": null,
       "files": []
     },
@@ -32,6 +46,7 @@
       "language": "multilingual",
       "sample_rate": 16000,
       "backend": "speechbrain",
+      "backend_id": "speechbrain-voxlingua107",
       "backend_version": null,
       "files": []
     }

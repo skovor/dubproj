@@ -27,7 +27,7 @@ from .post_qa import StageAudit, audit_candidate_stage, audit_scene_stage, persi
 from .processing import process_candidate
 from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2, is_provisional_result, linguistic_status, rank_candidate_v2, rank_provisional_v2, select_passed_v2
 from .reference import materialize_reference
-from .runtime_lock import assert_reproducible
+from .runtime_lock import assert_backend_matches_lock, assert_reproducible
 from .scheduler import run_cohorts
 
 
@@ -256,6 +256,15 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         # Direct API callers receive the same fail-closed guarantee as the
         # CLI. Lab mode explicitly reports LAB_UNPINNED instead.
         assert_reproducible(config, strict=True)
+        if config.models_lock is None:
+            raise ValueError("production V2 run requires models_lock")
+        assert_backend_matches_lock(runtime.backend, config.models_lock, role="generation", expected_model_id=config.model_id, expected_backend_version=runtime.backend_version)
+        if asr is not None:
+            assert_backend_matches_lock(asr, config.models_lock, role="asr")
+        if alignment_backend is not None:
+            assert_backend_matches_lock(alignment_backend, config.models_lock, role="alignment")
+        if lid_backend is not None:
+            assert_backend_matches_lock(lid_backend, config.models_lock, role="lid")
     validate_scene(scene)
     if config.lab_mode:
         if config.sandbox_root is None:

@@ -8,7 +8,6 @@ already computed SHA-256) for every model in ``--models-manifest``.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -16,17 +15,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from dubbing_pipeline.hashing import canonical_json
-from dubbing_pipeline.runtime_lock import collect_runtime_lock, model_file_entry
+from dubbing_pipeline.runtime_lock import aggregate_model_sha256, collect_runtime_lock, validate_models_lock, verify_model_files, model_file_entry, runtime_completion_errors
 
 
 def _model_digest(files: list[dict]) -> str | None:
     if not files:
         return None
-    # File locations are provenance only. The model identity must remain
-    # stable when the same bytes move to another machine.
-    semantic = [{"bytes": item.get("bytes"), "sha256": item.get("sha256")} for item in files]
-    return hashlib.sha256(canonical_json(sorted(semantic, key=lambda item: str(item.get("sha256", ""))))).hexdigest()
+    return aggregate_model_sha256(files)
 
 
 def _read_models(path: Path | None, args: argparse.Namespace) -> list[dict]:
@@ -35,7 +30,7 @@ def _read_models(path: Path | None, args: argparse.Namespace) -> list[dict]:
         if not isinstance(value, list):
             raise ValueError("--models-manifest must contain a JSON array")
         return [dict(item) for item in value]
-    files = [model_file_entry(item) for item in args.model_file]
+    files = [model_file_entry(item, logical_path=Path(item).name) for item in args.model_file]
     return [{
         "model_id": args.model_id,
         "revision": args.model_revision,
@@ -43,6 +38,7 @@ def _read_models(path: Path | None, args: argparse.Namespace) -> list[dict]:
         "language": args.language,
         "sample_rate": args.sample_rate,
         "backend": args.backend,
+        "backend_id": args.backend_id,
         "backend_version": args.backend_version,
         "files": files,
     }]
@@ -59,26 +55,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--language", default="de")
     parser.add_argument("--sample-rate", type=int, default=24000)
     parser.add_argument("--backend", default="omnivoice")
+    parser.add_argument("--backend-id", default="omnivoice")
     parser.add_argument("--backend-version")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--capabilities-json", type=Path)
+    parser.add_argument("--models-root", default="models")
     args = parser.parse_args(argv)
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    runtime = collect_runtime_lock(omnivoice_version=args.backend_version or "not-installed")
+    capabilities = None
+    if args.capabilities_json is not None:
+        capabilities = json.loads(args.capabilities_json.read_text(encoding="utf-8"))
+    runtime = collect_runtime_lock(device=args.device, capabilities=capabilities, omnivoice_version=args.backend_version)
     models = _read_models(args.models_manifest, args)
-    model_status = "COMPLETE" if all(item.get("revision") and item.get("sha256") and item.get("backend_version") for item in models) else "UNPROVISIONED"
+    model_lock_probe = {"schema": "generic-dubbing-model-lock-v2", "status": "UNPROVISIONED", "models": models, "models_root": args.models_root}
+    model_errors = validate_models_lock(model_lock_probe, strict=True)
+    model_errors.extend(verify_model_files(model_lock_probe, base_dir=out_dir, strict=True))
+    model_status = "COMPLETE" if not model_errors else "UNPROVISIONED"
     model_lock = {
-        "schema": "generic-dubbing-model-lock-v1",
-        "lock_version": 1,
+        "schema": "generic-dubbing-model-lock-v2",
+        "lock_version": 2,
         "status": model_status,
         "generated_by": "scripts/freeze_runtime.py",
+        "models_root": args.models_root,
         "models": models,
     }
+    runtime["status"] = "COMPLETE" if not runtime_completion_errors(runtime, required_capabilities=capabilities) else "UNPROVISIONED"
     runtime_path = out_dir / "runtime.lock.json"
     models_path = out_dir / "models.lock.json"
     runtime_path.write_text(json.dumps(runtime, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     models_path.write_text(json.dumps(model_lock, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"runtime_lock": str(runtime_path), "models_lock": str(models_path), "status": model_status}, ensure_ascii=False, indent=2))
-    return 0
+    status = "COMPLETE" if runtime["status"] == "COMPLETE" and model_status == "COMPLETE" else "UNPROVISIONED"
+    print(json.dumps({"runtime_lock": str(runtime_path), "models_lock": str(models_path), "status": status, "runtime_errors": runtime_completion_errors(runtime, required_capabilities=capabilities), "model_errors": model_errors}, ensure_ascii=False, indent=2))
+    return 0 if status == "COMPLETE" else 2
 
 
 if __name__ == "__main__":

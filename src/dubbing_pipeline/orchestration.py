@@ -15,7 +15,7 @@ from .models import Candidate, Scene
 from .policy import BLOCKED, KEEP_ORIGINAL, classify_line
 from .qa import GateResult, evaluate_candidate, select_passed
 from .reference import materialize_reference
-from .runtime_lock import assert_reproducible
+from .runtime_lock import assert_backend_matches_lock, assert_reproducible
 
 
 def _reference_for(line, project_root: Path) -> str | None:
@@ -73,6 +73,10 @@ def run_scene(scene: Scene, config: PipelineConfig, *, runtime: GenerationRuntim
     """
     if not bool(getattr(config, "lab_mode", True)):
         assert_reproducible(config, strict=True)
+        if config.models_lock is None:
+            raise ValueError("production run requires models_lock")
+        if asr is not None:
+            assert_backend_matches_lock(asr, config.models_lock, role="asr")
     validate_scene(scene)
     out = Path(output_dir or config.output_root) / scene.id
     out.mkdir(parents=True, exist_ok=True)
@@ -80,6 +84,8 @@ def run_scene(scene: Scene, config: PipelineConfig, *, runtime: GenerationRuntim
         if backend is None:
             raise RuntimeError("a SpeechBackend or GenerationRuntime is required for generable lines")
         runtime = GenerationRuntime(backend)
+    if not bool(getattr(config, "lab_mode", True)):
+        assert_backend_matches_lock(runtime.backend, config.models_lock, role="generation", expected_model_id=config.model_id, expected_backend_version=config.backend_version)
     report: dict[str, Any] = {"schema": "generic-dubbing-scene-report-v1", "scene": scene.id, "topology": scene.topology, "lines": [], "review": []}
     stem = None; stem_rate = config.sample_rate
     if scene.topology == "EMBEDDED_FMV":
