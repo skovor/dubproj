@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dubproj.dev/schemas/calibration-v1.json",
+  "title": "Gold-set calibration contract",
+  "type": "object",
+  "required": ["schema", "dataset", "splits", "labels"],
+  "properties": {
+    "schema": {"const": "generic-dubbing-calibration-v1"},
+    "dataset": {
+      "type": "object",
+      "required": ["audio_sha256", "scene_id", "line_id", "performance_mode"],
+      "properties": {
+        "audio_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "scene_id": {"type": "string", "minLength": 1},
+        "line_id": {"type": "string", "minLength": 1},
+        "performance_mode": {"enum": ["NEUTRAL", "FAST", "WHISPER", "SHOUT", "SCREAM_SPEECH", "CRYING_SPEECH", "EFFORT", "LAUGH_SPEECH"]}
+      },
+      "additionalProperties": false
+    },
+    "splits": {"enum": ["CALIBRATION", "VALIDATION", "HIDDEN_TEST"]},
+    "labels": {
+      "type": "array",
+      "items": {"enum": ["CORRECT_NEUTRAL", "CORRECT_EXPRESSIVE", "LEXICAL_ERROR", "FINAL_ANCHOR_MISSING", "SOURCE_LANGUAGE_LEAK", "PRONUNCIATION_BAD", "TIMING_BAD", "MOUNT_BAD", "UNDECIDABLE"]},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "evidence": {"type": "object", "additionalProperties": true},
+    "calibrator": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

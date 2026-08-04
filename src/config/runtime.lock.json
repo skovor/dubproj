@@ -1,0 +1,29 @@
+{
+  "schema": "generic-dubbing-runtime-lock-v1",
+  "lock_version": 1,
+  "status": "UNPROVISIONED",
+  "generated_by": "scripts/freeze_runtime.py",
+  "purpose": "Template only. Run freeze_runtime.py on the generation machine before any production run.",
+  "environment": {
+    "python": null,
+    "windows": null,
+    "architecture": null,
+    "cuda": null,
+    "nvidia_driver": null
+  },
+  "dependencies": {
+    "python": null,
+    "windows": null,
+    "cuda": null,
+    "nvidia_driver": null,
+    "pytorch": null,
+    "torchaudio": null,
+    "faster_whisper": null,
+    "ctranslate2": null,
+    "whisperx": null,
+    "speechbrain": null,
+    "mfa": null,
+    "ffmpeg": null,
+    "omnivoice": null
+  }
+}

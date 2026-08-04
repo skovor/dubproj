@@ -84,6 +84,8 @@ class PipelineConfig:
     runtime_root: Path | None = None
     runtime_adapter: str | None = None
     reference_root: Path | None = None
+    runtime_lock: Path | None = None
+    models_lock: Path | None = None
     lab_mode: bool = True
     sandbox_root: Path | None = None
     qa: QAConfig = field(default_factory=QAConfig)
@@ -113,9 +115,10 @@ class PipelineConfig:
             "fmv_initial_takes", "fmv_retry_takes", "append_ellipsis_experiment",
             "sample_rate", "native_sample_rate", "channels", "seed", "temperature", "t_shift", "postprocess_output", "text_normalization_version", "dialogue_channel", "ffmpeg", "vgmstream", "vgaudio",
             "runtime_root", "runtime_adapter", "reference_root", "lab_mode", "sandbox_root",
+            "runtime_lock", "models_lock",
         }
         values = {key: raw.pop(key) for key in list(raw) if key in known}
-        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root"):
+        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root", "runtime_lock", "models_lock"):
             if key in values:
                 values[key] = _path(values[key], base)
         values["qa"] = qa
@@ -128,7 +131,13 @@ class PipelineConfig:
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root"):
+        for key in ("project_root", "output_root", "cache_root", "ffmpeg", "vgmstream", "vgaudio", "runtime_root", "reference_root", "sandbox_root", "runtime_lock", "models_lock"):
             if result.get(key) is not None:
                 result[key] = str(result[key])
         return result
+
+    def reproducibility_report(self, *, strict: bool | None = None) -> dict[str, Any]:
+        """Return the lock/preflight report without loading optional ML packages."""
+        from .runtime_lock import reproducibility_report
+
+        return reproducibility_report(self, strict=strict)

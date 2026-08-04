@@ -15,6 +15,7 @@ from .models import Candidate, Scene
 from .policy import BLOCKED, KEEP_ORIGINAL, classify_line
 from .qa import GateResult, evaluate_candidate, select_passed
 from .reference import materialize_reference
+from .runtime_lock import assert_reproducible
 
 
 def _reference_for(line, project_root: Path) -> str | None:
@@ -70,6 +71,8 @@ def run_scene(scene: Scene, config: PipelineConfig, *, runtime: GenerationRuntim
     requested. A production caller normally supplies one persistent
     `GenerationRuntime` to process all scenes in a round.
     """
+    if not bool(getattr(config, "lab_mode", True)):
+        assert_reproducible(config, strict=True)
     validate_scene(scene)
     out = Path(output_dir or config.output_root) / scene.id
     out.mkdir(parents=True, exist_ok=True)

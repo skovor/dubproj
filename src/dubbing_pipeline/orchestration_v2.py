@@ -27,6 +27,7 @@ from .post_qa import StageAudit, audit_candidate_stage, audit_scene_stage, persi
 from .processing import process_candidate
 from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2, is_provisional_result, linguistic_status, rank_candidate_v2, rank_provisional_v2, select_passed_v2
 from .reference import materialize_reference
+from .runtime_lock import assert_reproducible
 from .scheduler import run_cohorts
 
 
@@ -251,6 +252,10 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     audited.  FMV winners are selected only from combinations that pass the
     complete scene audit.
     """
+    if not bool(getattr(config, "lab_mode", True)):
+        # Direct API callers receive the same fail-closed guarantee as the
+        # CLI. Lab mode explicitly reports LAB_UNPINNED instead.
+        assert_reproducible(config, strict=True)
     validate_scene(scene)
     if config.lab_mode:
         if config.sandbox_root is None:

@@ -1,0 +1,39 @@
+{
+  "schema": "generic-dubbing-model-lock-v1",
+  "lock_version": 1,
+  "status": "UNPROVISIONED",
+  "generated_by": "scripts/freeze_runtime.py",
+  "purpose": "Template only. Every revision and model-file SHA-256 must be supplied before production.",
+  "models": [
+    {
+      "model_id": "k2-fsa/OmniVoice",
+      "revision": null,
+      "sha256": null,
+      "language": "de",
+      "sample_rate": 24000,
+      "backend": "omnivoice",
+      "backend_version": null,
+      "files": []
+    },
+    {
+      "model_id": "whisperx-default-german-ctc",
+      "revision": null,
+      "sha256": null,
+      "language": "de",
+      "sample_rate": 16000,
+      "backend": "whisperx",
+      "backend_version": null,
+      "files": []
+    },
+    {
+      "model_id": "speechbrain/lang-id-voxlingua107-ecapa",
+      "revision": null,
+      "sha256": null,
+      "language": "multilingual",
+      "sample_rate": 16000,
+      "backend": "speechbrain",
+      "backend_version": null,
+      "files": []
+    }
+  ]
+}

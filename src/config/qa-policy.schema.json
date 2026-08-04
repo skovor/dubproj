@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dubproj.dev/schemas/qa-policy-v1.json",
+  "title": "Generic dubbing QA policy",
+  "type": "object",
+  "required": ["schema", "hard_gates", "diagnostic_metrics", "uncertainty_policy"],
+  "properties": {
+    "schema": {"const": "generic-dubbing-qa-policy-v1"},
+    "hard_gates": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "diagnostic_metrics": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "thresholds": {"type": "object", "additionalProperties": {"type": "number"}},
+    "uncertainty_policy": {
+      "type": "object",
+      "required": ["asr_uncertain_action", "score_authority", "cross_language_margin_authority"],
+      "properties": {
+        "asr_uncertain_action": {"const": "HOLD_NO_REGENERATION"},
+        "score_authority": {"const": "CALIBRATED_EVIDENCE_ONLY"},
+        "cross_language_margin_authority": {"const": "DIAGNOSTIC_ONLY"},
+        "mfa_authority": {"const": "DIAGNOSTIC_PHONETIC_FALLBACK"}
+      },
+      "additionalProperties": false
+    },
+    "statuses": {
+      "type": "array",
+      "items": {"enum": ["PASS_SCREENED", "PASS_CONFIRMED", "PASS_PHONETIC", "ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_SUSPECTED", "PERFORMANCE_UNCERTAIN", "HUMAN_REVIEW", "ALIGNER_NOT_APPLICABLE"]},
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

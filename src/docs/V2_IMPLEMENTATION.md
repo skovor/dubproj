@@ -59,6 +59,11 @@ hash-only baseline in the external sandbox.
 - `validate_instructions.py`, `reference-index.json`, and the V2 promotion
   manifest make the sanitized skill bundle reproducible without copying KIRO
   or private lesson corpora.
+- `runtime_lock.py` and `scripts/freeze_runtime.py` make the runtime/model
+  identity explicit. The checked-in locks are deliberately unprovisioned
+  templates; strict production preflight rejects unknown revisions, backend
+  versions and model SHA-256 values. Lab mode reports `LAB_UNPINNED` rather
+  than disguising that state as a reproducible run.
 
 ## Baseline and benchmark
 
