@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .audio import read
+from .asr import ASRCache, DualASREvidence, prepare_whisperx_escalation, transcribe_dual
 from .contracts import DeliveryWindow, FailureClass
 from .contracts.manifest import validate_scene_value
 from .generation_v2 import GenerationRuntimeV2, generate_cohort_v2
@@ -49,20 +50,43 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "artifact"
 
 
-def _transcribe_path(asr: Any, path: str | Path, cache: dict[str, tuple[str | None, str | None, float | None]]) -> tuple[str | None, str | None, float | None]:
-    """Transcribe each distinct serialized artifact once."""
+def _transcribe_evidence(
+    asr: Any,
+    path: str | Path,
+    cache: ASRCache,
+    *,
+    source_language: str,
+    target_language: str,
+    semantic_key: str | None = None,
+) -> DualASREvidence | None:
+    """Return dual evidence, or no linguistic evidence when ASR is disabled."""
+    if asr is None:
+        return None
+    return transcribe_dual(
+        asr,
+        path,
+        source_language=source_language,
+        target_language=target_language,
+        cache=cache,
+        semantic_key=semantic_key,
+    )
+
+
+def _transcribe_path(asr: Any, path: str | Path, cache: ASRCache | dict[str, Any]) -> tuple[str | None, str | None, float | None]:
+    """Compatibility shim exposing the forced-target reading only."""
     if asr is None:
         return None, None, None
+    if isinstance(cache, ASRCache):
+        evidence = _transcribe_evidence(asr, path, cache, source_language="en", target_language="de")
+        if evidence is None:
+            return None, None, None
+        return evidence.forced_target.text, evidence.forced_target.language, evidence.forced_target.probability
+    # Older callers supplied a plain dictionary; preserve its one-read API.
     key = sha256_file(path)
-    if key in cache:
-        return cache[key]
-    value = asr.transcribe(str(path))
-    if isinstance(value, dict):
-        result = (value.get("text"), value.get("language"), value.get("probability"))
-    else:
-        result = (str(value), None, None)
-    cache[key] = result
-    return result
+    if key not in cache:
+        value = asr.transcribe(str(path))
+        cache[key] = (value.get("text"), value.get("language"), value.get("probability")) if isinstance(value, dict) else (str(value), None, None)
+    return cache[key]
 
 
 def _profile(config: Any, supplied: LanguageProfile | None) -> LanguageProfile:
@@ -167,7 +191,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     for line in lines:
         refs[line.id] = materialize_reference(line, config.project_root, config.cache_root, language=config.source_language)
 
-    transcript_cache: dict[str, tuple[str | None, str | None, float | None]] = {}
+    asr_cache = ASRCache(Path(config.cache_root) / "asr-v3", backend_id=str(getattr(asr, "backend_id", "unknown"))) if asr is not None else ASRCache(backend_id="disabled")
     raw_audits: dict[str, StageAudit] = {}
     line_by_id = {line.id: line for line in lines}
 
@@ -180,7 +204,17 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
 
     def evaluate(candidate):
         line = line_by_id[candidate.line_id]
-        transcript, language, probability = _transcribe_path(asr, candidate.raw_audio, transcript_cache)
+        evidence = _transcribe_evidence(
+            asr,
+            candidate.raw_audio,
+            asr_cache,
+            source_language=config.source_language,
+            target_language=config.target_language,
+            semantic_key=f"{candidate.generation_hash}:{line.id}:{line.effective_target_text}",
+        )
+        transcript = evidence.forced_target.text if evidence is not None else None
+        language = evidence.automatic.language if evidence is not None else None
+        probability = evidence.automatic.probability if evidence is not None else None
         audit = audit_candidate_stage(
             candidate.raw_audio,
             stage="RAW_TECHNICAL_QA",
@@ -200,6 +234,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             final_word_min_tokens=config.qa.final_word_min_tokens,
             tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
             require_asr=True,
+            linguistic_evidence=evidence.to_dict() if evidence is not None else None,
         )
         raw_audits[candidate.candidate_id] = audit
         return _result_or_failed(audit)
@@ -250,6 +285,23 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             if audit is not None:
                 raw_rows.append(audit.to_dict())
         row["stages"]["RAW_TECHNICAL_QA"] = raw_rows
+        if raw_rows:
+            # A compact line-level view makes ASR uncertainty actionable in
+            # reports without requiring consumers to walk every stage bundle.
+            raw_diagnostics = raw_rows[0].get("diagnostics", {})
+            if raw_diagnostics.get("linguistic_decision") is not None:
+                row["linguistic"] = raw_diagnostics["linguistic_decision"]
+                decision = raw_diagnostics["linguistic_decision"]
+                if decision.get("status") == "ASR_UNCERTAIN":
+                    row["linguistic_action"] = "HOLD_FOR_SELECTIVE_ALIGNMENT"
+                    row["whisperx_escalation"] = prepare_whisperx_escalation(
+                        raw_rows[0].get("artifact_path") or "",
+                        expected_text=line.effective_target_text,
+                        source_text=line.source_text,
+                        language=config.target_language,
+                        reason="ASR_UNCERTAIN",
+                        evidence_hashes=list(decision.get("evidence_hashes") or []),
+                    ).to_dict()
         options: list[dict[str, Any]] = []
         for candidate, raw_result in evaluations:
             raw_audit = raw_audits.get(candidate.candidate_id)
@@ -267,7 +319,20 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 )
                 processed_path = persist_audio_atomic(candidate_root / "processed.wav", processed.audio, processed.sample_rate)
                 stage_counts["PROCESSED_QA"] += 1
-                processed_transcript, processed_language, processed_probability = _transcribe_path(asr, processed_path, transcript_cache)
+                processing_steps = set(processed.diagnostics.get("steps", []))
+                semantic_key = f"{candidate.generation_hash}:{line.id}:{line.effective_target_text}"
+                semantic_alias = semantic_key if processing_steps.issubset({"explicit_resample"}) else None
+                processed_evidence = _transcribe_evidence(
+                    asr,
+                    processed_path,
+                    asr_cache,
+                    source_language=config.source_language,
+                    target_language=config.target_language,
+                    semantic_key=semantic_alias,
+                )
+                processed_transcript = processed_evidence.forced_target.text if processed_evidence is not None else None
+                processed_language = processed_evidence.automatic.language if processed_evidence is not None else None
+                processed_probability = processed_evidence.automatic.probability if processed_evidence is not None else None
                 processed_audit = audit_candidate_stage(
                     processed_path,
                     stage="PROCESSED_QA",
@@ -285,6 +350,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     final_word_min_tokens=config.qa.final_word_min_tokens,
                     tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                     require_asr=True,
+                    linguistic_evidence=processed_evidence.to_dict() if processed_evidence is not None else None,
                 )
                 if not processed_audit.passed:
                     stage_rows.append({"raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None})
@@ -295,7 +361,16 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     mounted_path = persist_audio_atomic(candidate_root / "mounted.wav", mounted_array, stem_rate)
                     delivery_clip, clip_frames = _line_delivery_clip(mounted_array, line, scene, stem_rate)
                     clip_path = persist_audio_atomic(candidate_root / "mounted_line.wav", delivery_clip, stem_rate)
-                    mounted_transcript, mounted_language, mounted_probability = _transcribe_path(asr, clip_path, transcript_cache)
+                    mounted_evidence = _transcribe_evidence(
+                        asr,
+                        clip_path,
+                        asr_cache,
+                        source_language=config.source_language,
+                        target_language=config.target_language,
+                    )
+                    mounted_transcript = mounted_evidence.forced_target.text if mounted_evidence is not None else None
+                    mounted_language = mounted_evidence.automatic.language if mounted_evidence is not None else None
+                    mounted_probability = mounted_evidence.automatic.probability if mounted_evidence is not None else None
                     stage_counts["MOUNTED_QA"] += 1
                     mounted_audit = audit_candidate_stage(
                         clip_path,
@@ -315,6 +390,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         preserved_ok=mount_metrics.preserved_hash_before == mount_metrics.preserved_hash_after,
                         require_asr=True,
+                        linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence is not None else None,
                     )
                     protected_ok, untouched_ok, _integrity = _scene_integrity(source_array, mounted_array, [line], scene, stem_rate)
                     stage_counts["SERIALIZED_QA"] += 1
@@ -330,7 +406,17 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 else:
                     mounted_path = persist_audio_atomic(candidate_root / "mounted.wav", read(processed_path, always_2d=True)[0], target_rate)
                     delivery_clip, clip_frames = read(mounted_path, always_2d=True)
-                    mounted_transcript, mounted_language, mounted_probability = _transcribe_path(asr, mounted_path, transcript_cache)
+                    mounted_evidence = _transcribe_evidence(
+                        asr,
+                        mounted_path,
+                        asr_cache,
+                        source_language=config.source_language,
+                        target_language=config.target_language,
+                        semantic_key=semantic_alias,
+                    )
+                    mounted_transcript = mounted_evidence.forced_target.text if mounted_evidence is not None else None
+                    mounted_language = mounted_evidence.automatic.language if mounted_evidence is not None else None
+                    mounted_probability = mounted_evidence.automatic.probability if mounted_evidence is not None else None
                     stage_counts["MOUNTED_QA"] += 1
                     mounted_audit = audit_candidate_stage(
                         mounted_path,
@@ -349,9 +435,22 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         final_word_min_tokens=config.qa.final_word_min_tokens,
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
+                        linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence is not None else None,
                     )
                     stage_counts["SERIALIZED_QA"] += 1
-                    serialized_transcript, serialized_language, serialized_probability = _transcribe_path(asr, mounted_path, transcript_cache)
+                    # SERIALIZED_QA reopens the exact mounted artifact.  The
+                    # SHA cache therefore reuses both ASR readings; no second
+                    # linguistic decode is warranted for serialization alone.
+                    serialized_evidence = _transcribe_evidence(
+                        asr,
+                        mounted_path,
+                        asr_cache,
+                        source_language=config.source_language,
+                        target_language=config.target_language,
+                    )
+                    serialized_transcript = serialized_evidence.forced_target.text if serialized_evidence is not None else None
+                    serialized_language = serialized_evidence.automatic.language if serialized_evidence is not None else None
+                    serialized_probability = serialized_evidence.automatic.probability if serialized_evidence is not None else None
                     serialized_audit = audit_candidate_stage(
                         mounted_path,
                         stage="SERIALIZED_QA",
@@ -369,6 +468,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         final_word_min_tokens=config.qa.final_word_min_tokens,
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
+                        linguistic_evidence=serialized_evidence.to_dict() if serialized_evidence is not None else None,
                     )
                     mount_metrics = None
                 options.append({

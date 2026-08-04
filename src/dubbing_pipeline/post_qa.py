@@ -97,6 +97,7 @@ def audit_candidate_stage(
     preserved_ok: bool | None = None,
     require_asr: bool = True,
     neutral_effort: bool = False,
+    linguistic_evidence: Mapping[str, Any] | None = None,
 ) -> StageAudit:
     """Run the normal candidate QA against a persisted artifact.
 
@@ -127,6 +128,7 @@ def audit_candidate_stage(
             preserved_ok=preserved_ok,
             require_asr=require_asr,
             neutral_effort=neutral_effort,
+            linguistic_evidence=linguistic_evidence,
         )
         artifact_sha = sha256_file(path)
         qa_hash = contract_hash(

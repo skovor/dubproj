@@ -13,6 +13,7 @@ from dubbing_pipeline.deploy_v2 import DeploymentError, PackageEntry, deploy_ato
 from dubbing_pipeline.hashing import atomic_json, contract_hash
 from dubbing_pipeline.models import Line
 from dubbing_pipeline.montage import mount_surgical
+from dubbing_pipeline.asr import ASRCache, prepare_whisperx_escalation, transcribe_dual
 from dubbing_pipeline.qa_v2 import LanguageProfile, evaluate_candidate_v2, final_word, ordered_content, source_language_leak
 from dubbing_pipeline.scheduler import run_cohorts
 from dubbing_pipeline.telemetry import TelemetryCollector
@@ -90,6 +91,67 @@ class V2QATests(unittest.TestCase):
             passed = evaluate_candidate_v2(str(path), expected_text="Hallo dort", source_text="Hello there", target_sample_rate=24000, target_frames=2400, transcript="Hallo dort", language="de", language_probability=.99)
             self.assertTrue(passed.passed)
 
+    def test_unicode_normalization_keeps_german_content_deterministic(self):
+        self.assertEqual(ordered_content("Für nächste", "FÜR NÄCHSTE")[0], True)
+        self.assertEqual(ordered_content("Für nächste", "Fuer naechste")[0], False)
+
+    def test_dual_asr_marks_disagreement_uncertain_without_relaxing_content(self):
+        from dubbing_pipeline.post_qa import persist_audio_atomic
+        with tempfile.TemporaryDirectory() as directory:
+            path = persist_audio_atomic(Path(directory) / "audio.wav", np.ones(2400, dtype="float32") * .1, 24000)
+            class ASR:
+                def __init__(self): self.calls = []
+                def transcribe(self, _path, *, language=None):
+                    self.calls.append(language)
+                    return {"text": "Keine Sorge" if language == "de" else "Keine Zorge", "language": "de", "probability": .99}
+            backend = ASR(); cache = ASRCache(Path(directory) / "cache")
+            evidence = transcribe_dual(backend, path, source_language="en", target_language="de", cache=cache, semantic_key="speech-equivalent")
+            self.assertEqual(backend.calls, ["de", None])
+            self.assertEqual(evidence.forced_transcript, "Keine Sorge")
+            result = evaluate_candidate_v2(
+                str(path), expected_text="Keine Sorge", source_text="Don't worry",
+                target_sample_rate=24000, target_frames=2400,
+                linguistic_evidence=evidence.to_dict(),
+            )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.failure_class.value, "ASR_UNCERTAIN")
+            self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "ASR_UNCERTAIN")
+            # Reusing the same artifact must not perform either decode again.
+            second = transcribe_dual(backend, path, source_language="en", target_language="de", cache=cache, semantic_key="speech-equivalent")
+            self.assertEqual(len(backend.calls), 2)
+            self.assertTrue(second.forced_target.cache_hit)
+            self.assertTrue(second.automatic.cache_hit)
+            disk_cache = ASRCache(Path(directory) / "cache")
+            third = transcribe_dual(backend, path, source_language="en", target_language="de", cache=disk_cache, semantic_key="speech-equivalent")
+            self.assertEqual(len(backend.calls), 2)
+            self.assertTrue(third.forced_target.cache_hit)
+            transformed = persist_audio_atomic(Path(directory) / "resampled.wav", np.ones(2400, dtype="float32") * .11, 24000)
+            transcribe_dual(backend, transformed, source_language="en", target_language="de", cache=cache, semantic_key="speech-equivalent")
+            self.assertEqual(len(backend.calls), 2)
+
+    def test_english_audio_forced_as_german_is_language_leak_not_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._wav(directory)
+            evidence = {
+                "target_language": "de",
+                "evidence_hashes": ["a" * 64, "b" * 64],
+                "forced_target": {"mode": "forced_target", "text": "Dann wurde", "language": "de", "probability": .99},
+                "automatic": {"mode": "automatic", "text": "Don't worry", "language": "en", "probability": .99},
+            }
+            result = evaluate_candidate_v2(
+                str(path), expected_text="Keine Sorge", source_text="Don't worry",
+                target_sample_rate=24000, target_frames=2400,
+                linguistic_evidence=evidence,
+            )
+            self.assertFalse(result.passed)
+            self.assertEqual(result.diagnostics["linguistic_decision"]["status"], "LANGUAGE_LEAK_CONFIRMED")
+            self.assertEqual(result.gates["source_language"].status, GateStatus.FAIL)
+
+    def test_whisperx_escalation_is_only_a_serializable_request(self):
+        request = prepare_whisperx_escalation("candidate.wav", expected_text="Keine Sorge", source_text="Don't worry", evidence_hashes=["a" * 64])
+        self.assertEqual(request.to_dict()["status"], "PENDING")
+        self.assertEqual(request.to_dict()["backend"], "whisperx_or_mfa")
+
 
 class V2PostTransformTests(unittest.TestCase):
     def test_post_transform_audit_is_fail_closed_and_reopens_artifact(self):
@@ -165,6 +227,19 @@ class V2SchedulerTests(unittest.TestCase):
         self.assertEqual(order[0][0], "generate"); self.assertEqual(order[1][0], "qa"); self.assertEqual(report.retry_ids, [])
         self.assertNotIn("RUNTIME_SMOKE", report.phases)
         self.assertNotIn("MOUNT_SCENES", report.phases)
+
+    def test_asr_uncertain_is_held_without_regeneration(self):
+        class Result:
+            passed = False
+            failure_class = __import__("dubbing_pipeline.contracts", fromlist=["FailureClass"]).FailureClass.ASR_UNCERTAIN
+        generated = []
+        def generate(values, round_index):
+            generated.append(round_index)
+            return {value: [value] for value in values}
+        report = run_cohorts(["uncertain"], item_id=lambda value: value, generate=generate, evaluate=lambda _value: Result())
+        self.assertEqual(generated, [1])
+        self.assertEqual(report.retry_ids, [])
+        self.assertEqual(report.blockers[0]["reason"], "ASR_UNCERTAIN_HOLD")
 
     def test_fmv_scene_uses_surgical_mount(self):
         import soundfile as sf

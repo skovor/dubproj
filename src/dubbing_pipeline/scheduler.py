@@ -49,7 +49,20 @@ def run_cohorts(items: Iterable[Any], *, item_id: Callable[[Any], str], generate
         for key, rows in extra.items():
             candidates.setdefault(key, []).extend(rows)
             evaluations.setdefault(key, []).extend(evaluate(candidate) for candidate in rows)
-    retry_ids = [key for key, results in evaluations.items() if not any(getattr(result, "passed", False) for result in results)]
+    unresolved = [key for key, results in evaluations.items() if not any(getattr(result, "passed", False) for result in results)]
+    # ASR_UNCERTAIN is deliberately a hold for selective alignment, not a
+    # stochastic TTS retry.  Keep it visible as a blocker while ensuring the
+    # scheduler cannot spend another OmniVoice round on the same evidence.
+    retry_ids = []
+    for key in unresolved:
+        results = evaluations.get(key, [])
+        failures = {getattr(result, "failure_class", None) for result in results}
+        if FailureClass.STOCHASTIC_TTS in failures or FailureClass.STOCHASTIC_TTS.value in failures:
+            retry_ids.append(key)
+        elif FailureClass.ASR_UNCERTAIN in failures or FailureClass.ASR_UNCERTAIN.value in failures:
+            blockers.append({"line_id": key, "reason": "ASR_UNCERTAIN_HOLD"})
+        else:
+            blockers.append({"line_id": key, "reason": "NO_PASSING_CANDIDATE"})
     blockers.extend({"line_id": key, "reason": "NO_PASSING_CANDIDATE"} for key in retry_ids)
     # Selection, processing, mounting, serialization and deployment are owned
     # by the caller.  Do not advertise those phases merely because they exist

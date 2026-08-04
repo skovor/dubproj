@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from .audio import clipping, peak_dbfs, read
 from .contracts import FailureClass, GateEvidence, GateStatus, gate_passes
@@ -42,8 +42,63 @@ class QAResultV2:
         return {"passed": self.passed, "gates": {key: value.to_dict() for key, value in self.gates.items()}, "diagnostics": self.diagnostics, "failure_class": self.failure_class.value if self.failure_class else None}
 
 
-def _gate(name: str, status: GateStatus, measured: Any = None, threshold: Any = None, units: str | None = None, details: Mapping[str, Any] | None = None) -> GateEvidence:
-    return GateEvidence(name, status, measured_value=measured, threshold=threshold, units=units, details=dict(details or {}))
+LinguisticStatus = Literal[
+    "PASS_EXACT",
+    "PASS_PHONETIC",
+    "FAIL_CONFIRMED",
+    "ASR_UNCERTAIN",
+    "LANGUAGE_LEAK_CONFIRMED",
+    "PERFORMANCE_UNCERTAIN",
+    "NOT_APPLICABLE",
+]
+
+
+@dataclass(frozen=True)
+class LinguisticDecision:
+    """Structured linguistic verdict; never collapse evidence to one boolean."""
+
+    status: LinguisticStatus
+    expected_alignment_score: float | None = None
+    source_alignment_score: float | None = None
+    alignment_margin: float | None = None
+    forced_transcript: str | None = None
+    automatic_transcript: str | None = None
+    detected_language: str | None = None
+    language_probability: float | None = None
+    word_coverage: float | None = None
+    phone_coverage: float | None = None
+    final_anchor_present: bool | None = None
+    missing_tokens: list[str] = field(default_factory=list)
+    expected_tokens: list[str] = field(default_factory=list)
+    forced_final_tokens: list[str] = field(default_factory=list)
+    automatic_final_tokens: list[str] = field(default_factory=list)
+    evidence_hashes: list[str] = field(default_factory=list)
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "expected_alignment_score": self.expected_alignment_score,
+            "source_alignment_score": self.source_alignment_score,
+            "alignment_margin": self.alignment_margin,
+            "forced_transcript": self.forced_transcript,
+            "automatic_transcript": self.automatic_transcript,
+            "detected_language": self.detected_language,
+            "language_probability": self.language_probability,
+            "word_coverage": self.word_coverage,
+            "phone_coverage": self.phone_coverage,
+            "final_anchor_present": self.final_anchor_present,
+            "missing_tokens": list(self.missing_tokens),
+            "expected_tokens": list(self.expected_tokens),
+            "forced_final_tokens": list(self.forced_final_tokens),
+            "automatic_final_tokens": list(self.automatic_final_tokens),
+            "evidence_hashes": list(self.evidence_hashes),
+            "reason": self.reason,
+        }
+
+
+def _gate(name: str, status: GateStatus, measured: Any = None, threshold: Any = None, units: str | None = None, details: Mapping[str, Any] | None = None, evidence_hash: str | None = None) -> GateEvidence:
+    return GateEvidence(name, status, measured_value=measured, threshold=threshold, units=units, evidence_hash=evidence_hash, details=dict(details or {}))
 
 
 def ordered_content(expected: str, actual: str) -> tuple[bool, dict[str, Any]]:
@@ -76,9 +131,102 @@ def source_language_leak(source_text: str, transcript: str, language: str | None
     heard = set(tokens(transcript)); source = set(tokens(source_text))
     marker_hits = sorted(heard.intersection(tokens(" ".join(profile.source_markers))))
     strong_hits = sorted(heard.intersection(tokens(" ".join(profile.strong_source_words))))
+    source_overlap = sorted(heard.intersection(source))
     probable = (language or "").casefold() == profile.source_language.casefold() and float(probability or 0.0) >= .70
-    likely = bool(strong_hits) or (probable and len(marker_hits) >= 2)
-    return not likely, {"language": language, "probability": probability, "marker_hits": marker_hits, "strong_source_hits": strong_hits, "source_overlap": sorted(heard.intersection(source))}
+    source_ratio = (len(source_overlap) / len(source)) if source else 0.0
+    likely = bool(strong_hits) or (probable and (len(marker_hits) >= 2 or (len(source_overlap) >= 2 and source_ratio >= .60)))
+    return not likely, {"language": language, "probability": probability, "marker_hits": marker_hits, "strong_source_hits": strong_hits, "source_overlap": source_overlap, "source_overlap_ratio": source_ratio}
+
+
+def _coerce_reading(value: Mapping[str, Any] | None, *, default_mode: str) -> dict[str, Any]:
+    value = dict(value or {})
+    return {
+        "mode": str(value.get("mode", default_mode)),
+        "text": str(value.get("text", "")),
+        "language": value.get("language"),
+        "probability": float(value["probability"]) if value.get("probability") is not None else None,
+        "evidence_hash": str(value.get("evidence_hash", "")),
+    }
+
+
+def decide_linguistic_evidence(
+    expected_text: str,
+    source_text: str,
+    *,
+    forced_target: Mapping[str, Any],
+    automatic: Mapping[str, Any],
+    target_language: str,
+    profile: LanguageProfile,
+    final_word_min_tokens: int = 1,
+    evidence_hashes: Sequence[str] = (),
+) -> LinguisticDecision:
+    """Fuse two ASR readings without relaxing the lexical gates.
+
+    The exact content and final-word predicates remain unchanged.  The only
+    new behavior is explicit uncertainty when the two decodes disagree, which
+    prevents a single Whisper mistake from becoming either a regeneration
+    order or a false PASS.
+    """
+    forced = _coerce_reading(forced_target, default_mode="forced_target")
+    automatic_row = _coerce_reading(automatic, default_mode="automatic")
+    forced_text = forced["text"]
+    automatic_text = automatic_row["text"]
+    forced_content_ok, forced_content = ordered_content(expected_text, forced_text)
+    automatic_content_ok, automatic_content = ordered_content(expected_text, automatic_text)
+    forced_final_ok, forced_final = final_word(expected_text, forced_text, final_word_min_tokens)
+    automatic_final_ok, automatic_final = final_word(expected_text, automatic_text, final_word_min_tokens)
+    leak_ok, leak_details = source_language_leak(
+        source_text,
+        automatic_text,
+        automatic_row["language"],
+        automatic_row["probability"],
+        profile,
+    )
+    detected = automatic_row["language"]
+    language_known = detected is not None
+    automatic_target = (detected or "").casefold() == target_language.casefold()
+    target_confirmed = language_known and automatic_target and float(automatic_row["probability"] or 0.0) >= .70
+    # A backend without language metadata is not allowed to create a new
+    # hard PASS under the dual policy.  Legacy single-transcript callers keep
+    # their old behavior because this helper is only used with dual evidence.
+    if leak_details.get("strong_source_hits") or (not leak_ok and detected and not automatic_target):
+        status: LinguisticStatus = "LANGUAGE_LEAK_CONFIRMED"
+        reason = "automatic ASR independently indicates source-language speech"
+    elif forced_content_ok and forced_final_ok and automatic_content_ok and automatic_final_ok and target_confirmed:
+        status = "PASS_EXACT"
+        reason = "forced and automatic ASR agree on target content and final anchor"
+    elif forced_content_ok and forced_final_ok and automatic_target and (not automatic_content_ok or not automatic_final_ok):
+        status = "ASR_UNCERTAIN"
+        reason = "forced target decode passes but automatic decode disagrees"
+    elif automatic_content_ok and automatic_final_ok and (not forced_content_ok or not forced_final_ok):
+        status = "ASR_UNCERTAIN"
+        reason = "automatic decode passes but forced target decode disagrees"
+    elif target_confirmed and not forced_content_ok and not automatic_content_ok:
+        status = "FAIL_CONFIRMED"
+        reason = "both independent target-language readings miss required content"
+    else:
+        status = "ASR_UNCERTAIN"
+        reason = "language metadata or lexical evidence is insufficient for a definitive verdict"
+
+    expected = tokens(expected_text)
+    matched = len(forced_content.get("matched_in_order", []))
+    coverage = (matched / len(expected)) if expected else None
+    final_anchor = bool(forced_final_ok and automatic_final_ok)
+    return LinguisticDecision(
+        status=status,
+        forced_transcript=forced_text,
+        automatic_transcript=automatic_text,
+        detected_language=detected,
+        language_probability=automatic_row["probability"],
+        word_coverage=coverage,
+        final_anchor_present=final_anchor,
+        missing_tokens=list(forced_content.get("missing_tokens", [])),
+        expected_tokens=expected,
+        forced_final_tokens=list(forced_final.get("heard_final_tokens", [])),
+        automatic_final_tokens=list(automatic_final.get("heard_final_tokens", [])),
+        evidence_hashes=list(evidence_hashes),
+        reason=reason,
+    )
 
 
 def _failure_for(name: str) -> FailureClass:
@@ -99,7 +247,8 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           profile: LanguageProfile | None = None, hard_gates: Sequence[str] | None = None,
                           final_word_min_tokens: int = 1, tail_guard_seconds: float = .08,
                           splice_metrics: Mapping[str, tuple[bool, Any, Any, str]] | None = None,
-                          preserved_ok: bool | None = None, require_asr: bool = True, neutral_effort: bool = False) -> QAResultV2:
+                          preserved_ok: bool | None = None, require_asr: bool = True, neutral_effort: bool = False,
+                          linguistic_evidence: Mapping[str, Any] | None = None) -> QAResultV2:
     profile = profile or LanguageProfile()
     gates: dict[str, GateEvidence] = {}
     diagnostics: dict[str, Any] = {}
@@ -129,8 +278,40 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
     else:
         end = speech_end(audio, sample_rate); diagnostics["voice_end"] = end
         gates["tail"] = _gate("tail", GateStatus.PASS if end <= reference_end + tail_guard_seconds else GateStatus.FAIL, measured=end, threshold=reference_end + tail_guard_seconds, units="seconds")
-    lexical_ready = bool(transcript and transcript.strip())
-    if not lexical_ready:
+    lexical_decision: LinguisticDecision | None = None
+    lexical_ready = bool(transcript and transcript.strip()) or bool(linguistic_evidence)
+    if linguistic_evidence:
+        forced_row = dict(linguistic_evidence.get("forced_target") or {})
+        automatic_row = dict(linguistic_evidence.get("automatic") or {})
+        target_language = str(linguistic_evidence.get("target_language") or profile.target_language)
+        lexical_decision = decide_linguistic_evidence(
+            expected_text,
+            source_text,
+            forced_target=forced_row,
+            automatic=automatic_row,
+            target_language=target_language,
+            profile=profile,
+            final_word_min_tokens=final_word_min_tokens,
+            evidence_hashes=list(linguistic_evidence.get("evidence_hashes") or []),
+        )
+        forced_text = lexical_decision.forced_transcript or ""
+        automatic_text = lexical_decision.automatic_transcript or ""
+        forced_content_ok, forced_content_details = ordered_content(expected_text, forced_text)
+        forced_final_ok, forced_final_details = final_word(expected_text, forced_text, final_word_min_tokens)
+        leak_ok, leak_details = source_language_leak(
+            source_text,
+            automatic_text,
+            lexical_decision.detected_language,
+            lexical_decision.language_probability,
+            profile,
+        )
+        evidence_hash = lexical_decision.evidence_hashes[0] if lexical_decision.evidence_hashes else None
+        gates["content"] = _gate("content", GateStatus.PASS if forced_content_ok else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status}, evidence_hash=evidence_hash)
+        gates["final_word"] = _gate("final_word", GateStatus.PASS if forced_final_ok else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status}, evidence_hash=evidence_hash)
+        gates["source_language"] = _gate("source_language", GateStatus.PASS if leak_ok else GateStatus.FAIL, details={**leak_details, "linguistic_status": lexical_decision.status, "automatic_transcript": automatic_text}, evidence_hash=evidence_hash)
+        diagnostics["linguistic_decision"] = lexical_decision.to_dict()
+        diagnostics["asr"] = dict(linguistic_evidence)
+    elif not lexical_ready:
         lexical_status = GateStatus.NOT_RUN
         lexical_details = {"reason": "ASR_NOT_RUN"}
         if neutral_effort:
@@ -158,7 +339,16 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
     failures = [name for name in required if not gate_passes(gates.get(name, _gate(name, GateStatus.NOT_RUN)), allow_not_applicable=True)]
     # NOT_RUN is never silently accepted when it was a required gate.
     passed = not failures and all(gates[name].status is not GateStatus.NOT_RUN for name in required)
-    failure = _failure_for(failures[0]) if failures else None
+    if lexical_decision is not None and lexical_decision.status not in {"PASS_EXACT", "PASS_PHONETIC"}:
+        # Uncertainty is a hold/review state, never an implicit PASS and never
+        # a reason for the cohort scheduler to regenerate the line.
+        passed = False
+    if lexical_decision is not None and lexical_decision.status == "ASR_UNCERTAIN":
+        failure = FailureClass.ASR_UNCERTAIN
+    elif lexical_decision is not None and lexical_decision.status == "LANGUAGE_LEAK_CONFIRMED":
+        failure = FailureClass.STOCHASTIC_TTS
+    else:
+        failure = _failure_for(failures[0]) if failures else None
     return QAResultV2(passed, gates, diagnostics, failure)
 
 
@@ -178,4 +368,8 @@ def select_passed_v2(evaluations: Sequence[tuple[Any, QAResultV2]]) -> tuple[Any
     return max(passed, key=lambda item: rank_candidate_v2(item[1])) if passed else None
 
 
-__all__ = ["LanguageProfile", "QAResultV2", "evaluate_candidate_v2", "final_word", "ordered_content", "select_passed_v2", "source_language_leak"]
+__all__ = [
+    "LanguageProfile", "LinguisticDecision", "LinguisticStatus", "QAResultV2",
+    "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word",
+    "ordered_content", "select_passed_v2", "source_language_leak",
+]
