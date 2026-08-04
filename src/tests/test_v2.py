@@ -482,7 +482,11 @@ class V2QATests(unittest.TestCase):
         fake = FakeWhisperX()
         adapter._model = lambda _language: (fake, object(), {})
         result = adapter.align("candidate.wav", text="Sorge", language="de")
-        self.assertTrue(result["final_anchor_present"])
+        self.assertEqual(result["final_anchor_evidence"]["status"], "FINAL_ANCHOR_EVIDENCE_COLLECTED")
+        self.assertEqual(result["final_anchor_evidence"]["authority"], "DIAGNOSTIC_ONLY")
+        self.assertEqual(result["native_char_coverage"], 1.0)
+        self.assertEqual(len(result["char_segments"]), 5)
+        self.assertNotIn("final_anchor_present", result)
 
     def test_line_summary_does_not_use_first_candidate_as_authority(self):
         class Candidate:

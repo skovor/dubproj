@@ -38,6 +38,9 @@ does not suffice by itself: the profile must be authorized and match the
 active aligner `model_id`, `model_revision`, source/target languages, and
 performance mode. A missing, stale, or mismatched profile is `BLOCKED`; the
 runner never falls back to the default `.65` threshold as a hard verdict.
+Calibration blocks are classified as `FailureClass.DETERMINISTIC_CALIBRATION`
+and are held without OmniVoice regeneration; they are not acoustic ASR
+uncertainty.
 
 ## Decision states
 
@@ -85,6 +88,23 @@ profile is required before `PASS_CONFIRMED`, `PASS_PHONETIC`,
 `LANGUAGE_LEAK_CONFIRMED`, or `LEXICAL_FAILURE_CONFIRMED` can be emitted. A
 raw cross-language margin is preserved as `cross_language_margin` telemetry
 only, and it never overrides a source-language gate before calibration.
+
+## Character-level alignment evidence
+
+The WhisperX adapter requests `return_char_alignments=True` for the target
+subtitle and stores normalized character segments, native character coverage,
+mean/minimum/p10 scores, unaligned and interpolated characters, and a
+compression ratio. The final token is represented by a structured
+`final_anchor_evidence` object with timing, coverage, score, interpolation,
+speech-tail gap, and one of `FINAL_ANCHOR_EVIDENCE_COLLECTED`,
+`FINAL_ANCHOR_UNALIGNED`, `FINAL_ANCHOR_WEAK`, or
+`FINAL_ANCHOR_INTERPOLATED`.
+
+All of these fields are `DIAGNOSTIC_ONLY`. The character adapter does not
+emit a boolean `final_anchor_present` authority signal. A validated profile
+using `feature_schema_version = char-alignment-v1` may use the collected,
+non-interpolated final anchor only after its calibrated minimum score
+threshold is met.
 
 The line report is candidate-aware (`candidate_linguistic_decisions`,
 `line_linguistic_summary`, and `selected_candidate_linguistic_decision`).  An

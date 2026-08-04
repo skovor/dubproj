@@ -399,10 +399,8 @@ def _final_anchor_is_calibrated(
     """Require the commit-3 final-anchor evidence for calibrated authority."""
     evidence = decision.final_anchor_evidence
     if feature_schema_version == "char-alignment-v1":
-        # The legacy boolean remains a compatibility bridge only until the
-        # character-evidence adapter lands. Commit 3 removes this fallback.
         if not isinstance(evidence, Mapping):
-            return decision.final_anchor_present is True
+            return False
         if bool(evidence.get("interpolated")):
             return False
         minimum = evidence.get("minimum_score")

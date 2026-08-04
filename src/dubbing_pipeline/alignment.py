@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -97,6 +97,15 @@ class AlignmentReading:
     words: list[dict[str, Any]]
     record: EvidenceRecord
     cache_hit: bool = False
+    char_segments: list[dict[str, Any]] = field(default_factory=list)
+    native_char_coverage: float | None = None
+    mean_char_score: float | None = None
+    minimum_char_score: float | None = None
+    p10_char_score: float | None = None
+    unaligned_characters: list[str] = field(default_factory=list)
+    interpolated_characters: list[str] = field(default_factory=list)
+    compression_ratio: float | None = None
+    final_anchor_evidence: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +115,15 @@ class AlignmentReading:
             "coverage": self.coverage,
             "final_anchor_present": self.final_anchor_present,
             "words": self.words,
+            "char_segments": [dict(item) for item in (self.char_segments or [])],
+            "native_char_coverage": self.native_char_coverage,
+            "mean_char_score": self.mean_char_score,
+            "minimum_char_score": self.minimum_char_score,
+            "p10_char_score": self.p10_char_score,
+            "unaligned_characters": list(self.unaligned_characters or []),
+            "interpolated_characters": list(self.interpolated_characters or []),
+            "compression_ratio": self.compression_ratio,
+            "final_anchor_evidence": dict(self.final_anchor_evidence) if self.final_anchor_evidence is not None else None,
             "record": self.record.to_dict(),
             "cache_hit": self.cache_hit,
         }
@@ -171,13 +189,125 @@ def _record(
     )
 
 
+def _raw_char_segments(value: Mapping[str, Any], words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = value.get("char_segments", value.get("charSegments"))
+    if isinstance(rows, list):
+        return [dict(item) for item in rows if isinstance(item, Mapping)]
+    rows = []
+    for word in words:
+        nested = word.get("chars", word.get("char_segments", word.get("charSegments", [])))
+        if isinstance(nested, list):
+            rows.extend(dict(item) for item in nested if isinstance(item, Mapping))
+    return rows
+
+
+def _character_evidence(text: str, value: Mapping[str, Any], words: list[dict[str, Any]]) -> dict[str, Any]:
+    """Normalize WhisperX/MFA character output into diagnostic-only metrics."""
+    expected = [char for char in str(text or "") if not char.isspace()]
+    raw_rows = _raw_char_segments(value, words)
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_rows):
+        char = str(raw.get("char", raw.get("text", raw.get("label", ""))) or "")
+        if not char or char.isspace():
+            continue
+        start = raw.get("start")
+        end = raw.get("end")
+        try:
+            start_value = float(start) if start is not None else None
+            end_value = float(end) if end is not None else None
+        except (TypeError, ValueError):
+            start_value, end_value = None, None
+        score_value = raw.get("score", raw.get("confidence", raw.get("probability")))
+        try:
+            score = max(0.0, min(1.0, float(score_value))) if score_value is not None else None
+        except (TypeError, ValueError):
+            score = None
+        rows.append({
+            "char": char,
+            "start": start_value,
+            "end": end_value,
+            "score": score,
+            "aligned": start_value is not None and end_value is not None,
+            "interpolated": bool(raw.get("interpolated", raw.get("is_interpolated", False))),
+            "index": index,
+        })
+    aligned_count = 0
+    unaligned: list[str] = []
+    interpolated: list[str] = []
+    normalized_rows: list[dict[str, Any]] = []
+    for index, char in enumerate(expected):
+        row = rows[index] if index < len(rows) else {"char": "", "start": None, "end": None, "score": None, "aligned": False, "interpolated": False}
+        row = dict(row)
+        row["expected_char"] = char
+        if row.get("aligned"):
+            aligned_count += 1
+        else:
+            unaligned.append(char)
+        if row.get("interpolated"):
+            interpolated.append(char)
+        normalized_rows.append(row)
+    scores = [float(row["score"]) for row in normalized_rows if row.get("score") is not None]
+    scores.sort()
+    coverage = (aligned_count / len(expected)) if expected else 0.0
+    p10 = scores[max(0, min(len(scores) - 1, int(round((len(scores) - 1) * .10))))] if scores else None
+    final_token_match = re.findall(r"[^\W\d_]+", str(text or ""), flags=re.UNICODE)
+    final_chars = [char for char in (final_token_match[-1] if final_token_match else "") if not char.isspace()]
+    final_rows = normalized_rows[-len(final_chars):] if final_chars else []
+    final_aligned = [row for row in final_rows if row.get("aligned")]
+    final_scores = [float(row["score"]) for row in final_rows if row.get("score") is not None]
+    final_start = min((row["start"] for row in final_aligned), default=None)
+    final_end = max((row["end"] for row in final_aligned), default=None)
+    active_end = max((float(row["end"]) for row in normalized_rows if row.get("end") is not None), default=None)
+    final_coverage = (len(final_aligned) / len(final_chars)) if final_chars else 0.0
+    final_interpolated = any(bool(row.get("interpolated")) for row in final_rows)
+    if not final_rows or final_coverage <= 0.0:
+        final_status = "FINAL_ANCHOR_UNALIGNED"
+    elif final_interpolated:
+        final_status = "FINAL_ANCHOR_INTERPOLATED"
+    elif final_coverage < 1.0 or not final_scores or min(final_scores) < .5:
+        final_status = "FINAL_ANCHOR_WEAK"
+    else:
+        final_status = "FINAL_ANCHOR_EVIDENCE_COLLECTED"
+    final_evidence = {
+        "token": final_token_match[-1] if final_token_match else "",
+        "expected_characters": len(final_chars),
+        "aligned_characters": len(final_aligned),
+        "coverage": final_coverage,
+        "start": final_start,
+        "end": final_end,
+        "duration_ms": ((final_end - final_start) * 1000.0) if final_start is not None and final_end is not None else None,
+        "mean_score": (sum(final_scores) / len(final_scores)) if final_scores else None,
+        "minimum_score": min(final_scores) if final_scores else None,
+        "interpolated": final_interpolated,
+        "gap_to_active_speech_end_ms": ((active_end - final_end) * 1000.0) if active_end is not None and final_end is not None else None,
+        "status": final_status,
+        "authority": "DIAGNOSTIC_ONLY",
+    }
+    return {
+        "char_segments": normalized_rows,
+        "native_char_coverage": coverage,
+        "mean_char_score": (sum(scores) / len(scores)) if scores else None,
+        "minimum_char_score": min(scores) if scores else None,
+        "p10_char_score": p10,
+        "unaligned_characters": unaligned,
+        "interpolated_characters": interpolated,
+        "compression_ratio": (len(rows) / len(expected)) if expected else 0.0,
+        "final_anchor_evidence": final_evidence,
+    }
+
+
 def _normalise_alignment(value: Mapping[str, Any], *, text: str, language: str, record: EvidenceRecord, cache_hit: bool) -> AlignmentReading:
     words = [dict(item) for item in value.get("words", value.get("word_segments", []))]
     score = float(value.get("score", value.get("alignment_score", value.get("confidence", 0.0))) or 0.0)
     coverage_value = value.get("coverage", value.get("word_coverage"))
     coverage = float(coverage_value) if coverage_value is not None else None
     final = value.get("final_anchor_present", value.get("final_word_present"))
-    return AlignmentReading(text, language, max(0.0, min(1.0, score)), coverage, bool(final) if final is not None else None, words, record, cache_hit)
+    char_metrics = _character_evidence(text, value, words)
+    return AlignmentReading(
+        text, language, max(0.0, min(1.0, score)), coverage,
+        bool(final) if final is not None else None, words, record, cache_hit,
+        **char_metrics,
+    )
 
 
 def contrastive_align(
@@ -262,16 +392,18 @@ class WhisperXCTCAligner:
         # WhisperX accepts an iterable of segment dictionaries, not the outer
         # transcription-result object used by Whisper's decode API.
         segments = [{"start": 0.0, "end": duration, "text": text}]
-        aligned = whisperx.align(segments, model, metadata, audio, self.device, return_char_alignments=False)
+        aligned = whisperx.align(segments, model, metadata, audio, self.device, return_char_alignments=True)
         words = [dict(item) for item in aligned.get("word_segments", [])]
         expected_count = max(1, len(text.split()))
         covered = sum(1 for item in words if item.get("start") is not None and item.get("end") is not None)
         coverage = min(1.0, covered / expected_count)
         score_values = [float(item.get("score", 1.0)) for item in words if item.get("score") is not None]
         score = (sum(score_values) / len(score_values)) * coverage if score_values else coverage
-        final_token = _fold_word(text.split()[-1]) if text.split() else ""
-        final_present = bool(words and final_token and final_token == _fold_word(words[-1].get("word", "")))
-        return {"score": score, "coverage": coverage, "final_anchor_present": final_present, "words": words}
+        # Character-level evidence is explicitly diagnostic.  The caller must
+        # use ``final_anchor_evidence.status``; no legacy boolean PASS is
+        # emitted by this adapter.
+        char_metrics = _character_evidence(text, aligned, words)
+        return {"score": score, "coverage": coverage, "words": words, **char_metrics}
 
 
 def _extract_mfa_words(value: Any) -> list[dict[str, Any]]:

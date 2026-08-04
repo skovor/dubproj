@@ -39,6 +39,11 @@ hash-only baseline in the external sandbox.
   emit only diagnostic support, weak, conflict, or strong-suspicion states;
   those states are held as `ASR_UNCERTAIN` and cannot pass or trigger a retry.
   A mismatched requested profile is `BLOCKED`, never an implicit fallback.
+- The validated calibration contract binds authority to a real calibrator
+  artifact/hash, dataset and split hashes, thresholds, metrics, provenance,
+  runtime/model locks, and `char-alignment-v1`. Character-level alignment is
+  collected separately as diagnostic evidence; it cannot grant authority by
+  itself.
 - `post_qa.py` makes the delivery boundary explicit: every raw candidate is
   re-audited after processing, after surgical mounting, and after reopening
   the serialized artifact. FMV scenes receive a final full-scene audit that

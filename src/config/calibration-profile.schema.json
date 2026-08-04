@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dubproj.dev/schemas/calibration-profile-v1.json",
+  "title": "Validated alignment calibration profile",
+  "type": "object",
+  "required": ["schema", "status", "authority", "profile_id", "identity", "thresholds", "calibrator", "dataset", "metrics", "provenance"],
+  "properties": {
+    "schema": {"const": "generic-dubbing-alignment-calibration-profile-v1"},
+    "status": {"const": "VALIDATED"},
+    "authority": {"const": true},
+    "profile_id": {"type": "string", "minLength": 1},
+    "identity": {
+      "type": "object",
+      "required": ["backend_id", "model_id", "model_revision", "feature_schema_version", "target_language", "source_language", "performance_modes"],
+      "properties": {
+        "backend_id": {"type": "string", "minLength": 1},
+        "model_id": {"type": "string", "minLength": 1},
+        "model_revision": {"type": "string", "minLength": 1},
+        "feature_schema_version": {"const": "char-alignment-v1"},
+        "target_language": {"type": "string", "minLength": 1},
+        "source_language": {"type": "string", "minLength": 1},
+        "performance_modes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": true
+    },
+    "thresholds": {
+      "type": "object",
+      "required": ["target_pass_probability", "target_failure_probability", "final_anchor_pass_probability", "source_lid_probability"],
+      "properties": {
+        "target_pass_probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "target_failure_probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "final_anchor_pass_probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "source_lid_probability": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": true
+    },
+    "calibrator": {
+      "type": "object",
+      "required": ["type", "artifact_path", "artifact_sha256"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "artifact_path": {"type": "string", "minLength": 1},
+        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "dataset": {
+      "type": "object",
+      "required": ["manifest_sha256", "labels_sha256", "split_manifest_sha256", "calibration_count", "validation_count", "hidden_test_count"],
+      "additionalProperties": true
+    },
+    "metrics": {"type": "object", "required": ["hidden_false_pass_count", "hidden_false_fail_count", "brier_score", "expected_calibration_error"], "additionalProperties": true},
+    "provenance": {
+      "type": "object",
+      "required": ["code_commit", "runtime_lock_sha256", "models_lock_sha256", "created_at"],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
