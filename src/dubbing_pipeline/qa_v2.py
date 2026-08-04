@@ -22,6 +22,10 @@ def tokens(text: str) -> list[str]:
     return [fold(item) for item in _TOKEN.findall(str(text or ""))]
 
 
+def _language_code(value: Any) -> str:
+    return str(value or "").casefold().replace("_", "-").split(":", 1)[0].split("-", 1)[0].strip()
+
+
 @dataclass(frozen=True)
 class LanguageProfile:
     source_language: str = "en"
@@ -43,12 +47,17 @@ class QAResultV2:
 
 
 LinguisticStatus = Literal[
-    "PASS_EXACT",
+    "PASS_SCREENED",
+    "PASS_CONFIRMED",
     "PASS_PHONETIC",
-    "FAIL_CONFIRMED",
     "ASR_UNCERTAIN",
+    "ALIGNMENT_UNCERTAIN",
     "LANGUAGE_LEAK_CONFIRMED",
+    "LANGUAGE_LEAK_SUSPECTED",
+    "LEXICAL_FAILURE_CONFIRMED",
+    "ALIGNER_NOT_APPLICABLE",
     "PERFORMANCE_UNCERTAIN",
+    "HUMAN_REVIEW",
     "NOT_APPLICABLE",
 ]
 
@@ -73,6 +82,11 @@ class LinguisticDecision:
     forced_final_tokens: list[str] = field(default_factory=list)
     automatic_final_tokens: list[str] = field(default_factory=list)
     evidence_hashes: list[str] = field(default_factory=list)
+    evidence_families: list[str] = field(default_factory=list)
+    evidence_records: list[dict[str, Any]] = field(default_factory=list)
+    audio_sha256: str | None = None
+    screened: bool = False
+    confirmed: bool = False
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -93,6 +107,11 @@ class LinguisticDecision:
             "forced_final_tokens": list(self.forced_final_tokens),
             "automatic_final_tokens": list(self.automatic_final_tokens),
             "evidence_hashes": list(self.evidence_hashes),
+            "evidence_families": list(self.evidence_families),
+            "evidence_records": list(self.evidence_records),
+            "audio_sha256": self.audio_sha256,
+            "screened": self.screened,
+            "confirmed": self.confirmed,
             "reason": self.reason,
         }
 
@@ -132,7 +151,7 @@ def source_language_leak(source_text: str, transcript: str, language: str | None
     marker_hits = sorted(heard.intersection(tokens(" ".join(profile.source_markers))))
     strong_hits = sorted(heard.intersection(tokens(" ".join(profile.strong_source_words))))
     source_overlap = sorted(heard.intersection(source))
-    probable = (language or "").casefold() == profile.source_language.casefold() and float(probability or 0.0) >= .70
+    probable = _language_code(language) == _language_code(profile.source_language) and float(probability or 0.0) >= .70
     source_ratio = (len(source_overlap) / len(source)) if source else 0.0
     likely = bool(strong_hits) or (probable and (len(marker_hits) >= 2 or (len(source_overlap) >= 2 and source_ratio >= .60)))
     return not likely, {"language": language, "probability": probability, "marker_hits": marker_hits, "strong_source_hits": strong_hits, "source_overlap": source_overlap, "source_overlap_ratio": source_ratio}
@@ -159,14 +178,10 @@ def decide_linguistic_evidence(
     profile: LanguageProfile,
     final_word_min_tokens: int = 1,
     evidence_hashes: Sequence[str] = (),
+    evidence_records: Sequence[Mapping[str, Any]] = (),
+    audio_sha256: str | None = None,
 ) -> LinguisticDecision:
-    """Fuse two ASR readings without relaxing the lexical gates.
-
-    The exact content and final-word predicates remain unchanged.  The only
-    new behavior is explicit uncertainty when the two decodes disagree, which
-    prevents a single Whisper mistake from becoming either a regeneration
-    order or a false PASS.
-    """
+    """Screen with correlated Whisper readings; never call them independent."""
     forced = _coerce_reading(forced_target, default_mode="forced_target")
     automatic_row = _coerce_reading(automatic, default_mode="automatic")
     forced_text = forced["text"]
@@ -184,29 +199,26 @@ def decide_linguistic_evidence(
     )
     detected = automatic_row["language"]
     language_known = detected is not None
-    automatic_target = (detected or "").casefold() == target_language.casefold()
+    automatic_target = _language_code(detected) == _language_code(target_language)
     target_confirmed = language_known and automatic_target and float(automatic_row["probability"] or 0.0) >= .70
     # A backend without language metadata is not allowed to create a new
     # hard PASS under the dual policy.  Legacy single-transcript callers keep
     # their old behavior because this helper is only used with dual evidence.
     if leak_details.get("strong_source_hits") or (not leak_ok and detected and not automatic_target):
-        status: LinguisticStatus = "LANGUAGE_LEAK_CONFIRMED"
-        reason = "automatic ASR independently indicates source-language speech"
+        status: LinguisticStatus = "LANGUAGE_LEAK_SUSPECTED"
+        reason = "automatic Whisper evidence suggests source-language speech; independent LID/alignment required"
     elif forced_content_ok and forced_final_ok and automatic_content_ok and automatic_final_ok and target_confirmed:
-        status = "PASS_EXACT"
-        reason = "forced and automatic ASR agree on target content and final anchor"
+        status = "PASS_SCREENED"
+        reason = "forced and automatic Whisper readings agree; CTC confirmation still required"
     elif forced_content_ok and forced_final_ok and automatic_target and (not automatic_content_ok or not automatic_final_ok):
         status = "ASR_UNCERTAIN"
         reason = "forced target decode passes but automatic decode disagrees"
     elif automatic_content_ok and automatic_final_ok and (not forced_content_ok or not forced_final_ok):
         status = "ASR_UNCERTAIN"
         reason = "automatic decode passes but forced target decode disagrees"
-    elif target_confirmed and not forced_content_ok and not automatic_content_ok:
-        status = "FAIL_CONFIRMED"
-        reason = "both independent target-language readings miss required content"
     else:
         status = "ASR_UNCERTAIN"
-        reason = "language metadata or lexical evidence is insufficient for a definitive verdict"
+        reason = "correlated Whisper evidence is insufficient for a definitive verdict"
 
     expected = tokens(expected_text)
     matched = len(forced_content.get("matched_in_order", []))
@@ -225,7 +237,104 @@ def decide_linguistic_evidence(
         forced_final_tokens=list(forced_final.get("heard_final_tokens", [])),
         automatic_final_tokens=list(automatic_final.get("heard_final_tokens", [])),
         evidence_hashes=list(evidence_hashes),
+        evidence_families=["WHISPER_ASR"],
+        evidence_records=[dict(item) for item in evidence_records],
+        audio_sha256=audio_sha256,
+        screened=status == "PASS_SCREENED",
+        confirmed=False,
         reason=reason,
+    )
+
+
+def apply_independent_evidence(
+    base: LinguisticDecision,
+    alignment_evidence: Mapping[str, Any] | None,
+    *,
+    lid_evidence: Mapping[str, Any] | None = None,
+    min_target_score: float = .65,
+    min_margin: float = .20,
+    source_leak_score: float = .75,
+    target_language: str = "de",
+    source_language: str = "en",
+) -> LinguisticDecision:
+    """Promote a screen only after a genuinely different evidence family.
+
+    Two Whisper modes remain one ``WHISPER_ASR`` family.  A hard linguistic
+    confirmation therefore requires CTC/Kaldi alignment, and a confirmed
+    source-language leak additionally requires independent LID or a clearly
+    superior source-text alignment.
+    """
+    if not alignment_evidence:
+        return LinguisticDecision(
+            **{**base.__dict__, "status": "ALIGNER_NOT_APPLICABLE", "confirmed": False,
+               "reason": "no independent alignment family is available; candidate is held"}
+        )
+    target_score = float(alignment_evidence.get("target_score", (alignment_evidence.get("target") or {}).get("score", 0.0)) or 0.0)
+    source_value = alignment_evidence.get("source_score")
+    if source_value is None and alignment_evidence.get("source") is not None:
+        source_value = (alignment_evidence.get("source") or {}).get("score")
+    source_score = float(source_value) if source_value is not None else None
+    margin_value = alignment_evidence.get("margin")
+    margin = float(margin_value) if margin_value is not None else (target_score - source_score if source_score is not None else None)
+    alignment_target = alignment_evidence.get("target") or {}
+    final_anchor = alignment_target.get("final_anchor_present", base.final_anchor_present)
+    records = list(base.evidence_records)
+    records.extend(list(alignment_evidence.get("evidence_records") or []))
+    if lid_evidence:
+        if lid_evidence.get("record"):
+            records.append(dict(lid_evidence["record"]))
+    families = sorted({str(family) for family in base.evidence_families if family} | {str(item.get("evidence_family")) for item in records if item.get("evidence_family")})
+    if base.audio_sha256:
+        mismatched = [item for item in records if item.get("audio_sha256") and item.get("audio_sha256") != base.audio_sha256]
+        if mismatched:
+            return LinguisticDecision(
+                **{**base.__dict__, "status": "ALIGNMENT_UNCERTAIN", "expected_alignment_score": target_score,
+                   "source_alignment_score": source_score, "alignment_margin": margin,
+                   "evidence_records": records, "evidence_families": families,
+                   "reason": "independent evidence belongs to a different audio artifact"}
+            )
+    independent_alignment = any(family in {"CTC_FORCED_ALIGNER", "KALDI_FORCED_ALIGNER"} for family in families)
+    # A hard linguistic verdict cannot be manufactured from a bare score or
+    # from one family whose record was accidentally omitted.  Keep the
+    # candidate in review until Whisper + a second acoustic family are both
+    # represented in the decision contract.
+    if not independent_alignment or len(families) < 2:
+        return LinguisticDecision(
+            **{**base.__dict__, "status": "ALIGNMENT_UNCERTAIN", "expected_alignment_score": target_score,
+               "source_alignment_score": source_score, "alignment_margin": margin,
+               "evidence_records": records, "evidence_families": families,
+               "reason": "at least two independent evidence families are required for a hard linguistic verdict"}
+        )
+
+    lid_language = _language_code((lid_evidence or {}).get("language", ""))
+    source_code = _language_code(source_language)
+    lid_probability = float((lid_evidence or {}).get("probability", 0.0) or 0.0)
+    independent_source_lid = bool(lid_evidence and lid_language == source_code and lid_probability >= .70)
+    source_alignment_wins = source_score is not None and source_score >= source_leak_score and (margin is None or margin <= -min_margin)
+    target_alignment_wins = target_score >= min_target_score and (margin is None or margin >= min_margin)
+
+    if source_alignment_wins and independent_source_lid:
+        status: LinguisticStatus = "LANGUAGE_LEAK_CONFIRMED"
+        reason = "CTC alignment favors source text and independent spoken-language ID agrees"
+    elif source_alignment_wins:
+        status = "LANGUAGE_LEAK_SUSPECTED"
+        reason = "CTC alignment favors source text; independent LID is absent or inconclusive"
+    elif target_alignment_wins:
+        status = "PASS_CONFIRMED" if base.status == "PASS_SCREENED" else "PASS_PHONETIC"
+        reason = "independent CTC/Kaldi alignment confirms target phonetic content"
+    elif target_score < (min_target_score - .15) and (source_score is None or source_score < source_leak_score):
+        status = "LEXICAL_FAILURE_CONFIRMED"
+        reason = "independent alignment rejects target content without confirming source language"
+    else:
+        status = "ALIGNMENT_UNCERTAIN"
+        reason = "contrastive target/source alignment margin is inconclusive"
+    return LinguisticDecision(
+        **{**base.__dict__, "status": status, "expected_alignment_score": target_score,
+           "source_alignment_score": source_score, "alignment_margin": margin,
+           "final_anchor_present": bool(final_anchor) if final_anchor is not None else base.final_anchor_present,
+           "evidence_records": records, "evidence_families": families,
+           "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
+           "reason": reason}
     )
 
 
@@ -248,7 +357,12 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           final_word_min_tokens: int = 1, tail_guard_seconds: float = .08,
                           splice_metrics: Mapping[str, tuple[bool, Any, Any, str]] | None = None,
                           preserved_ok: bool | None = None, require_asr: bool = True, neutral_effort: bool = False,
-                          linguistic_evidence: Mapping[str, Any] | None = None) -> QAResultV2:
+                          linguistic_evidence: Mapping[str, Any] | None = None,
+                          alignment_evidence: Mapping[str, Any] | None = None,
+                          lid_evidence: Mapping[str, Any] | None = None,
+                          alignment_min_target_score: float = .65,
+                          alignment_min_margin: float = .20,
+                          alignment_source_leak_score: float = .75) -> QAResultV2:
     profile = profile or LanguageProfile()
     gates: dict[str, GateEvidence] = {}
     diagnostics: dict[str, Any] = {}
@@ -283,6 +397,16 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
     if linguistic_evidence:
         forced_row = dict(linguistic_evidence.get("forced_target") or {})
         automatic_row = dict(linguistic_evidence.get("automatic") or {})
+        declared_records = [dict(item) for item in linguistic_evidence.get("evidence_records", [])]
+        if not declared_records:
+            declared_records = [
+                dict(row["evidence_record"])
+                for row in (forced_row, automatic_row)
+                if isinstance(row.get("evidence_record"), Mapping)
+            ]
+        declared_hashes = list(linguistic_evidence.get("evidence_hashes") or [])
+        if not declared_hashes:
+            declared_hashes = [str(row.get("evidence_hash")) for row in (forced_row, automatic_row) if row.get("evidence_hash")]
         target_language = str(linguistic_evidence.get("target_language") or profile.target_language)
         lexical_decision = decide_linguistic_evidence(
             expected_text,
@@ -292,8 +416,21 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
             target_language=target_language,
             profile=profile,
             final_word_min_tokens=final_word_min_tokens,
-            evidence_hashes=list(linguistic_evidence.get("evidence_hashes") or []),
+            evidence_hashes=declared_hashes,
+            evidence_records=declared_records,
+            audio_sha256=str(linguistic_evidence.get("audio_sha256") or "") or None,
         )
+        if alignment_evidence is not None or lid_evidence is not None:
+            lexical_decision = apply_independent_evidence(
+                lexical_decision,
+                alignment_evidence,
+                lid_evidence=lid_evidence,
+                min_target_score=alignment_min_target_score,
+                min_margin=alignment_min_margin,
+                source_leak_score=alignment_source_leak_score,
+                target_language=target_language,
+                source_language=profile.source_language,
+            )
         forced_text = lexical_decision.forced_transcript or ""
         automatic_text = lexical_decision.automatic_transcript or ""
         forced_content_ok, forced_content_details = ordered_content(expected_text, forced_text)
@@ -306,11 +443,29 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
             profile,
         )
         evidence_hash = lexical_decision.evidence_hashes[0] if lexical_decision.evidence_hashes else None
-        gates["content"] = _gate("content", GateStatus.PASS if forced_content_ok else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status}, evidence_hash=evidence_hash)
-        gates["final_word"] = _gate("final_word", GateStatus.PASS if forced_final_ok else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status}, evidence_hash=evidence_hash)
-        gates["source_language"] = _gate("source_language", GateStatus.PASS if leak_ok else GateStatus.FAIL, details={**leak_details, "linguistic_status": lexical_decision.status, "automatic_transcript": automatic_text}, evidence_hash=evidence_hash)
+        alignment_confirms_content = lexical_decision.status in {"PASS_CONFIRMED", "PASS_PHONETIC"} and lexical_decision.expected_alignment_score is not None and lexical_decision.expected_alignment_score >= alignment_min_target_score
+        # A CTC score may rescue a Whisper lexical miss, but it may not
+        # silently certify an absent final-word anchor.  ``None`` remains
+        # unknown and therefore keeps the hard final-word gate closed.
+        alignment_confirms_final = alignment_confirms_content and lexical_decision.final_anchor_present is True
+        gates["content"] = _gate("content", GateStatus.PASS if (forced_content_ok or alignment_confirms_content) else GateStatus.FAIL, measured=forced_content_details.get("matched_in_order"), details={**forced_content_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_content}, evidence_hash=evidence_hash)
+        gates["final_word"] = _gate("final_word", GateStatus.PASS if (forced_final_ok or alignment_confirms_final) else GateStatus.FAIL, measured=forced_final_details.get("heard_final_tokens"), details={**forced_final_details, "linguistic_status": lexical_decision.status, "alignment_confirmed": alignment_confirms_final}, evidence_hash=evidence_hash)
+        alignment_overrides_whisper_leak = bool(
+            alignment_confirms_content
+            and (lexical_decision.source_alignment_score is None or lexical_decision.source_alignment_score < alignment_source_leak_score)
+        )
+        gates["source_language"] = _gate(
+            "source_language",
+            GateStatus.PASS if (leak_ok or alignment_overrides_whisper_leak) else GateStatus.FAIL,
+            details={**leak_details, "linguistic_status": lexical_decision.status, "automatic_transcript": automatic_text, "alignment_overrode_whisper_leak": alignment_overrides_whisper_leak},
+            evidence_hash=evidence_hash,
+        )
         diagnostics["linguistic_decision"] = lexical_decision.to_dict()
         diagnostics["asr"] = dict(linguistic_evidence)
+        if alignment_evidence is not None:
+            diagnostics["alignment"] = dict(alignment_evidence)
+        if lid_evidence is not None:
+            diagnostics["language_id"] = dict(lid_evidence)
     elif not lexical_ready:
         lexical_status = GateStatus.NOT_RUN
         lexical_details = {"reason": "ASR_NOT_RUN"}
@@ -339,13 +494,13 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
     failures = [name for name in required if not gate_passes(gates.get(name, _gate(name, GateStatus.NOT_RUN)), allow_not_applicable=True)]
     # NOT_RUN is never silently accepted when it was a required gate.
     passed = not failures and all(gates[name].status is not GateStatus.NOT_RUN for name in required)
-    if lexical_decision is not None and lexical_decision.status not in {"PASS_EXACT", "PASS_PHONETIC"}:
+    if lexical_decision is not None and lexical_decision.status not in {"PASS_CONFIRMED", "PASS_PHONETIC"}:
         # Uncertainty is a hold/review state, never an implicit PASS and never
         # a reason for the cohort scheduler to regenerate the line.
         passed = False
-    if lexical_decision is not None and lexical_decision.status == "ASR_UNCERTAIN":
+    if lexical_decision is not None and lexical_decision.status in {"ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "ALIGNER_NOT_APPLICABLE", "HUMAN_REVIEW"}:
         failure = FailureClass.ASR_UNCERTAIN
-    elif lexical_decision is not None and lexical_decision.status == "LANGUAGE_LEAK_CONFIRMED":
+    elif lexical_decision is not None and lexical_decision.status in {"LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"}:
         failure = FailureClass.STOCHASTIC_TTS
     else:
         failure = _failure_for(failures[0]) if failures else None
@@ -353,13 +508,41 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
 
 
 def rank_candidate_v2(result: QAResultV2) -> float:
-    """Ranking only compares already-passed candidates using measured data."""
+    """Rank final candidates; provisional candidates use ``rank_provisional``."""
     if not result.passed:
         return float("-inf")
     score = 0.0
     score += 2.0 if result.gates.get("final_word", _gate("final_word", GateStatus.NOT_RUN)).status is GateStatus.PASS else 0.0
     score += 2.0 if result.gates.get("content", _gate("content", GateStatus.NOT_RUN)).status is GateStatus.PASS else 0.0
     score -= abs(float(result.diagnostics.get("active_rms_db", -20.0)) + 20.0) * .01
+    return score
+
+
+def linguistic_status(result: QAResultV2) -> str | None:
+    value = result.diagnostics.get("linguistic_decision")
+    return str(value.get("status")) if isinstance(value, Mapping) and value.get("status") else None
+
+
+def is_provisional_result(result: QAResultV2) -> bool:
+    return linguistic_status(result) in {
+        "PASS_SCREENED", "ASR_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED",
+        "ALIGNMENT_UNCERTAIN", "ALIGNER_NOT_APPLICABLE",
+    }
+
+
+def rank_provisional_v2(result: QAResultV2) -> float:
+    """Rank a candidate for selective alignment without declaring final PASS."""
+    if not is_provisional_result(result):
+        return float("-inf")
+    technical = ("not_empty", "finite_audio", "sample_rate", "channels", "frames", "clipping", "active_loudness", "tail", "serialization_contract")
+    if any(result.gates.get(name, _gate(name, GateStatus.NOT_RUN)).status is GateStatus.FAIL for name in technical):
+        return float("-inf")
+    status = linguistic_status(result)
+    score = 0.0
+    score += 3.0 if status == "PASS_SCREENED" else 1.0
+    score += 1.5 if result.gates.get("final_word", _gate("final_word", GateStatus.NOT_RUN)).status is GateStatus.PASS else 0.0
+    score += 1.5 if result.gates.get("content", _gate("content", GateStatus.NOT_RUN)).status is GateStatus.PASS else 0.0
+    score += float(result.diagnostics.get("linguistic_decision", {}).get("word_coverage") or 0.0)
     return score
 
 
@@ -370,6 +553,7 @@ def select_passed_v2(evaluations: Sequence[tuple[Any, QAResultV2]]) -> tuple[Any
 
 __all__ = [
     "LanguageProfile", "LinguisticDecision", "LinguisticStatus", "QAResultV2",
-    "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word",
-    "ordered_content", "select_passed_v2", "source_language_leak",
+    "apply_independent_evidence", "decide_linguistic_evidence", "evaluate_candidate_v2", "final_word",
+    "is_provisional_result", "linguistic_status", "ordered_content", "rank_provisional_v2",
+    "select_passed_v2", "source_language_leak",
 ]

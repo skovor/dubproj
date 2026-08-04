@@ -32,6 +32,9 @@ class QAConfig:
     max_lufs_delta: float = 3.5
     max_splice_speech_onset_error_ms: float = 60.0
     max_seam_notch_db: float = 12.0
+    alignment_min_target_score: float = .65
+    alignment_min_margin: float = .20
+    alignment_source_leak_score: float = .75
     english_markers: list[str] = field(default_factory=lambda: [
         "the", "you", "what", "why", "yes", "no", "not", "are", "is",
         "can", "will", "this", "that", "your", "to", "of", "and",

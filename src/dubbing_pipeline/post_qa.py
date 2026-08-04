@@ -98,6 +98,11 @@ def audit_candidate_stage(
     require_asr: bool = True,
     neutral_effort: bool = False,
     linguistic_evidence: Mapping[str, Any] | None = None,
+    alignment_evidence: Mapping[str, Any] | None = None,
+    lid_evidence: Mapping[str, Any] | None = None,
+    alignment_min_target_score: float = .65,
+    alignment_min_margin: float = .20,
+    alignment_source_leak_score: float = .75,
 ) -> StageAudit:
     """Run the normal candidate QA against a persisted artifact.
 
@@ -129,6 +134,11 @@ def audit_candidate_stage(
             require_asr=require_asr,
             neutral_effort=neutral_effort,
             linguistic_evidence=linguistic_evidence,
+            alignment_evidence=alignment_evidence,
+            lid_evidence=lid_evidence,
+            alignment_min_target_score=alignment_min_target_score,
+            alignment_min_margin=alignment_min_margin,
+            alignment_source_leak_score=alignment_source_leak_score,
         )
         artifact_sha = sha256_file(path)
         qa_hash = contract_hash(

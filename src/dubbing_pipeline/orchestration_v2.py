@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .audio import read
+from .alignment import AlignmentCache, AlignmentUnavailable, contrastive_align, language_id_evidence
 from .asr import ASRCache, DualASREvidence, prepare_whisperx_escalation, transcribe_dual
 from .contracts import DeliveryWindow, FailureClass
 from .contracts.manifest import validate_scene_value
@@ -24,7 +25,7 @@ from .montage import mount_surgical
 from .policy import BLOCKED, KEEP_ORIGINAL, classify_line
 from .post_qa import StageAudit, audit_candidate_stage, audit_scene_stage, persist_audio_atomic
 from .processing import process_candidate
-from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2, rank_candidate_v2, select_passed_v2
+from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2, is_provisional_result, linguistic_status, rank_candidate_v2, rank_provisional_v2, select_passed_v2
 from .reference import materialize_reference
 from .scheduler import run_cohorts
 
@@ -106,6 +107,75 @@ def _result_or_failed(audit: StageAudit) -> QAResultV2:
     return QAResultV2(False, audit.gates, audit.diagnostics, audit.failure_class)
 
 
+def _audit_can_escalate(audit: StageAudit | None) -> bool:
+    """Technical PASS plus a provisional linguistic state may be aligned."""
+    if audit is None or audit.result is None:
+        return False
+    result = audit.result
+    technical = ("not_empty", "finite_audio", "sample_rate", "channels", "frames", "clipping", "active_loudness", "tail", "serialization_contract")
+    if any(result.gates.get(name) is not None and result.gates[name].status.name == "FAIL" for name in technical):
+        return False
+    return is_provisional_result(result)
+
+
+def _line_linguistic_summary(row: dict[str, Any], options: list[dict[str, Any]], *, expected_text: str, source_text: str = "", target_language: str = "de") -> None:
+    decisions: list[dict[str, Any]] = []
+    escalations: list[dict[str, Any]] = []
+    for option in options:
+        candidate = option.get("candidate")
+        raw = option.get("raw_audit")
+        mounted = option.get("mounted_audit")
+        raw_decision = (raw.diagnostics if raw is not None else {}).get("linguistic_decision") or {}
+        mounted_decision = (mounted.diagnostics if mounted is not None else {}).get("linguistic_decision") or {}
+        decision = mounted_decision or raw_decision
+        alignment_status = option.get("alignment_status")
+        # A screened Whisper result is never presented as a final verdict
+        # when the independent family is unavailable or still ambiguous.
+        effective_status = decision.get("status")
+        if not option.get("eligible") and alignment_status in {
+            "ALIGNER_NOT_APPLICABLE", "ALIGNMENT_UNCERTAIN", "ALIGNMENT_ERROR", "ASR_EVIDENCE_MISSING",
+        }:
+            effective_status = "ASR_UNCERTAIN" if alignment_status == "ASR_EVIDENCE_MISSING" else ("ALIGNMENT_UNCERTAIN" if alignment_status == "ALIGNMENT_ERROR" else alignment_status)
+        item = {
+            "candidate_id": getattr(candidate, "candidate_id", None),
+            "raw_status": raw_decision.get("status"),
+            "mounted_status": mounted_decision.get("status"),
+            "status": effective_status,
+            "eligible": bool(option.get("eligible", False)),
+            "alignment_status": alignment_status,
+            "evidence_families": decision.get("evidence_families", []),
+            "evidence_hashes": decision.get("evidence_hashes", []),
+            "detected_language": decision.get("detected_language"),
+            "language_probability": decision.get("language_probability"),
+            "expected_alignment_score": decision.get("expected_alignment_score"),
+            "source_alignment_score": decision.get("source_alignment_score"),
+            "alignment_margin": decision.get("alignment_margin"),
+            "missing_tokens": decision.get("missing_tokens", []),
+            "final_anchor_present": decision.get("final_anchor_present"),
+            "reason": decision.get("reason", ""),
+        }
+        decisions.append(item)
+        if raw_decision.get("status") in {"ASR_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "ALIGNMENT_UNCERTAIN", "ALIGNER_NOT_APPLICABLE"}:
+            evidence = raw.diagnostics.get("asr", {}) if raw is not None else {}
+            escalations.append(prepare_whisperx_escalation(
+                raw.artifact_path if raw is not None and raw.artifact_path else "",
+                candidate_id=getattr(candidate, "candidate_id", None),
+                expected_text=expected_text,
+                source_text=source_text,
+                language=target_language,
+                reason=str(raw_decision.get("status")),
+                evidence_hashes=list(raw_decision.get("evidence_hashes") or evidence.get("evidence_hashes") or []),
+            ).to_dict())
+    row["candidate_linguistic_decisions"] = decisions
+    row["line_linguistic_summary"] = {
+        "candidate_count": len(decisions),
+        "status_counts": {status: sum(1 for item in decisions if item.get("status") == status) for status in sorted({item.get("status") for item in decisions if item.get("status")})},
+        "eligible_count": sum(1 for item in decisions if item.get("eligible")),
+    }
+    if escalations:
+        row["whisperx_escalations"] = escalations
+
+
 def _line_delivery_clip(mounted, line: Line, scene: Scene, sample_rate: int):
     import numpy as np
 
@@ -160,6 +230,9 @@ def _stage_bundle(option: dict[str, Any]) -> dict[str, Any]:
         "processed": option["processed_audit"].to_dict() if option.get("processed_audit") is not None else None,
         "mounted": option["mounted_audit"].to_dict() if option.get("mounted_audit") is not None else None,
         "serialized": option["serialized_audit"].to_dict() if option.get("serialized_audit") is not None else None,
+        "alignment": option.get("alignment"),
+        "lid": option.get("lid"),
+        "alignment_status": option.get("alignment_status"),
         "error": option.get("error"),
     }
 
@@ -170,7 +243,7 @@ def _aggregate_line_scene_audit(rows: list[dict[str, Any]]) -> StageAudit:
     return StageAudit(stage="SCENE_QA", passed=passed, qa_hash=qa_hash, diagnostics={"topology": "LINE_SEPARATED", "line_count": len(rows)})
 
 
-def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None) -> dict[str, Any]:
+def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None) -> dict[str, Any]:
     """Run one scene and select only candidates that survive delivery QA.
 
     Raw QA is deliberately a filter, not the final decision.  Every surviving
@@ -191,7 +264,18 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     for line in lines:
         refs[line.id] = materialize_reference(line, config.project_root, config.cache_root, language=config.source_language)
 
-    asr_cache = ASRCache(Path(config.cache_root) / "asr-v3", backend_id=str(getattr(asr, "backend_id", "unknown"))) if asr is not None else ASRCache(backend_id="disabled")
+    asr_cache = ASRCache(
+        Path(config.cache_root) / "asr-v4",
+        backend_id=str(getattr(asr, "backend_id", "unknown")),
+        model_id=str(getattr(asr, "model_id", "unknown")),
+        model_revision=str(getattr(asr, "model_revision", "unknown")),
+    ) if asr is not None else ASRCache(backend_id="disabled")
+    alignment_cache = AlignmentCache(
+        Path(config.cache_root) / "alignment-v1",
+        backend_id=str(getattr(alignment_backend, "backend_id", "unknown")),
+        model_id=str(getattr(alignment_backend, "model_id", "unknown")),
+        model_revision=str(getattr(alignment_backend, "model_revision", "unknown")),
+    ) if alignment_backend is not None else None
     raw_audits: dict[str, StageAudit] = {}
     line_by_id = {line.id: line for line in lines}
 
@@ -251,7 +335,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         "phases": list(cohort.phases),
         "stage_evidence": {},
     }
-    stage_counts = {name: 0 for name in ("RAW_TECHNICAL_QA", "PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "SCENE_QA")}
+    stage_counts = {name: 0 for name in ("RAW_TECHNICAL_QA", "PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "LINGUISTIC_ALIGNMENT", "SCENE_QA")}
+    alignment_count = 0
     stage_counts["RAW_TECHNICAL_QA"] = sum(len(value) for value in cohort.evaluations.values())
     report["stage_evidence"]["RAW_TECHNICAL_QA"] = {"status": "EXECUTED", "artifact_count": stage_counts["RAW_TECHNICAL_QA"]}
 
@@ -285,27 +370,10 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             if audit is not None:
                 raw_rows.append(audit.to_dict())
         row["stages"]["RAW_TECHNICAL_QA"] = raw_rows
-        if raw_rows:
-            # A compact line-level view makes ASR uncertainty actionable in
-            # reports without requiring consumers to walk every stage bundle.
-            raw_diagnostics = raw_rows[0].get("diagnostics", {})
-            if raw_diagnostics.get("linguistic_decision") is not None:
-                row["linguistic"] = raw_diagnostics["linguistic_decision"]
-                decision = raw_diagnostics["linguistic_decision"]
-                if decision.get("status") == "ASR_UNCERTAIN":
-                    row["linguistic_action"] = "HOLD_FOR_SELECTIVE_ALIGNMENT"
-                    row["whisperx_escalation"] = prepare_whisperx_escalation(
-                        raw_rows[0].get("artifact_path") or "",
-                        expected_text=line.effective_target_text,
-                        source_text=line.source_text,
-                        language=config.target_language,
-                        reason="ASR_UNCERTAIN",
-                        evidence_hashes=list(decision.get("evidence_hashes") or []),
-                    ).to_dict()
         options: list[dict[str, Any]] = []
         for candidate, raw_result in evaluations:
             raw_audit = raw_audits.get(candidate.candidate_id)
-            if raw_audit is None or not raw_audit.passed:
+            if raw_audit is None or not _audit_can_escalate(raw_audit):
                 continue
             target_rate = int(stem_rate or config.sample_rate)
             candidate_root = out / "candidates" / _safe_name(line.id) / _safe_name(candidate.candidate_id)
@@ -352,7 +420,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     require_asr=True,
                     linguistic_evidence=processed_evidence.to_dict() if processed_evidence is not None else None,
                 )
-                if not processed_audit.passed:
+                if not _audit_can_escalate(processed_audit):
                     stage_rows.append({"raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None})
                     continue
                 if scene.topology == "EMBEDDED_FMV":
@@ -481,7 +549,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     "mounted_path": str(mounted_path),
                     "mount_metrics": mount_metrics,
                     "processing_hash": processed.processing_hash,
-                    "eligible": bool(mounted_audit.passed and serialized_audit.passed),
+                    "eligible": False,
                 })
                 stage_rows.append(options[-1])
             except Exception as exc:
@@ -491,10 +559,123 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 stage_rows.append({"raw_audit": raw_audit, "processed_audit": None, "mounted_audit": None, "serialized_audit": None, "error": str(exc)})
         options_by_line[line.id] = options
         row["candidate_stages"] = [_stage_bundle(option) for option in stage_rows]
+        _line_linguistic_summary(row, options, expected_text=line.effective_target_text, source_text=line.source_text, target_language=config.target_language)
         report["lines"].append(row)
 
     for stage in ("PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA"):
         report["stage_evidence"][stage] = {"status": "EXECUTED" if stage_counts[stage] else "NOT_RUN", "artifact_count": stage_counts[stage]}
+
+    # Selective second-family QA: at most one provisional winner per line is
+    # aligned initially; a fallback candidate is aligned only if that winner
+    # is rejected or remains ambiguous.  No Cartesian product is involved.
+    for line in scene.lines:
+        options = options_by_line.get(line.id, [])
+        row = row_by_id.get(line.id)
+        if row is None or not options:
+            continue
+        provisional = [option for option in options if _audit_can_escalate(option.get("mounted_audit"))]
+        provisional.sort(key=lambda option: rank_provisional_v2(option["mounted_audit"].result), reverse=True)
+        for option in provisional:
+            option["alignment_status"] = "NOT_SELECTED"
+        for option in provisional:
+            option["alignment_status"] = "ALIGNMENT_PENDING"
+            mounted_audit = option["mounted_audit"]
+            asr_evidence = mounted_audit.diagnostics.get("asr") if mounted_audit is not None else None
+            if alignment_backend is None:
+                option["alignment_status"] = "ALIGNER_NOT_APPLICABLE"
+                break
+            if not asr_evidence:
+                option["alignment_status"] = "ASR_EVIDENCE_MISSING"
+                continue
+            try:
+                alignment = contrastive_align(
+                    alignment_backend,
+                    mounted_audit.artifact_path or "",
+                    target_text=line.effective_target_text,
+                    source_text=line.source_text,
+                    target_language=config.target_language,
+                    source_language=config.source_language,
+                    cache=alignment_cache,
+                    semantic_key=f"{option['candidate'].generation_hash}:{line.id}:{line.effective_target_text}",
+                )
+                alignment_count += 1
+                stage_counts["LINGUISTIC_ALIGNMENT"] += 1
+                alignment_dict = alignment.to_dict()
+                lid = None
+                if alignment.source_score is not None and alignment.source_score >= float(getattr(config.qa, "alignment_source_leak_score", .75)) and lid_backend is not None:
+                    lid = language_id_evidence(lid_backend, mounted_audit.artifact_path or "")
+                mounted_audio, mounted_rate = read(mounted_audit.artifact_path or "", always_2d=True)
+                regraded = audit_candidate_stage(
+                    mounted_audit.artifact_path or "",
+                    stage="MOUNTED_QA",
+                    expected_text=line.effective_target_text,
+                    source_text=line.source_text,
+                    target_sample_rate=int(mounted_rate),
+                    target_frames=len(mounted_audio),
+                    channels=int(mounted_audio.shape[1]),
+                    reference_end=len(mounted_audio) / mounted_rate,
+                    profile=profile,
+                    hard_gates=list(config.qa.hard_gates),
+                    final_word_min_tokens=config.qa.final_word_min_tokens,
+                    tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
+                    preserved_ok=(mounted_audit.gates.get("preserved_intervals").measured_value if mounted_audit.gates.get("preserved_intervals") is not None else None),
+                    require_asr=True,
+                    linguistic_evidence=asr_evidence,
+                    alignment_evidence=alignment_dict,
+                    lid_evidence=lid,
+                    alignment_min_target_score=float(getattr(config.qa, "alignment_min_target_score", .65)),
+                    alignment_min_margin=float(getattr(config.qa, "alignment_min_margin", .20)),
+                    alignment_source_leak_score=float(getattr(config.qa, "alignment_source_leak_score", .75)),
+                )
+                option["mounted_audit"] = regraded
+                option["alignment"] = alignment_dict
+                option["lid"] = lid
+                option["alignment_status"] = linguistic_status(regraded.result) or "ALIGNMENT_UNCERTAIN"
+                if scene.topology != "EMBEDDED_FMV" and option.get("serialized_audit") is not None:
+                    # For a line-separated asset the serialized artifact is
+                    # the same speech file, but it has its own stage audit.
+                    # Regrade that boundary with the same independent family;
+                    # otherwise a stale pre-alignment ASR_UNCERTAIN result
+                    # would veto a correctly confirmed candidate.
+                    option["serialized_audit"] = audit_candidate_stage(
+                        option["serialized_audit"].artifact_path or mounted_audit.artifact_path or "",
+                        stage="SERIALIZED_QA",
+                        expected_text=line.effective_target_text,
+                        source_text=line.source_text,
+                        target_sample_rate=int(mounted_rate),
+                        target_frames=len(mounted_audio),
+                        channels=int(mounted_audio.shape[1]),
+                        reference_end=len(mounted_audio) / mounted_rate,
+                        profile=profile,
+                        hard_gates=list(config.qa.hard_gates),
+                        final_word_min_tokens=config.qa.final_word_min_tokens,
+                        tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
+                        require_asr=True,
+                        linguistic_evidence=asr_evidence,
+                        alignment_evidence=alignment_dict,
+                        lid_evidence=lid,
+                        alignment_min_target_score=float(getattr(config.qa, "alignment_min_target_score", .65)),
+                        alignment_min_margin=float(getattr(config.qa, "alignment_min_margin", .20)),
+                        alignment_source_leak_score=float(getattr(config.qa, "alignment_source_leak_score", .75)),
+                    )
+                option["eligible"] = bool(regraded.passed and option["serialized_audit"].passed)
+                if option["eligible"]:
+                    break
+            except AlignmentUnavailable as exc:
+                option["alignment_status"] = "ALIGNER_NOT_APPLICABLE"
+                option["alignment_error"] = str(exc)
+                break
+            except Exception as exc:
+                option["alignment_status"] = "ALIGNMENT_ERROR"
+                option["alignment_error"] = str(exc)
+        _line_linguistic_summary(row, options, expected_text=line.effective_target_text, source_text=line.source_text, target_language=config.target_language)
+        row["candidate_stages"] = [_stage_bundle(option) for option in options]
+
+    report["stage_evidence"]["LINGUISTIC_ALIGNMENT"] = {
+        "status": "EXECUTED" if alignment_count else "NOT_RUN",
+        "artifact_count": alignment_count,
+        "independent_family": getattr(alignment_backend, "evidence_family", None).value if alignment_backend is not None and hasattr(getattr(alignment_backend, "evidence_family", None), "value") else (str(getattr(alignment_backend, "evidence_family", "")) if alignment_backend is not None else None),
+    }
 
     generable_lines = [line for line in scene.lines if line.id in options_by_line]
     chosen_options: dict[str, dict[str, Any]] = {}
@@ -549,7 +730,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             for line in generable_lines:
                 option = chosen_options[line.id]
                 row = row_by_id[line.id]
-                row.update({"status": "FINAL_PASS", "candidate_id": option["candidate"].candidate_id, "processing_hash": option["processing_hash"], "mount": option["mount_metrics"].to_dict() if option["mount_metrics"] is not None else None, "qa": option["mounted_audit"].result.to_dict() if option["mounted_audit"].result is not None else None})
+                row.update({"status": "FINAL_PASS", "candidate_id": option["candidate"].candidate_id, "processing_hash": option["processing_hash"], "mount": option["mount_metrics"].to_dict() if option["mount_metrics"] is not None else None, "qa": option["mounted_audit"].result.to_dict() if option["mounted_audit"].result is not None else None, "selected_candidate_linguistic_decision": option["mounted_audit"].diagnostics.get("linguistic_decision")})
         else:
             final_scene_audit = combo_audit or StageAudit(stage="SCENE_QA", passed=False, diagnostics={"reason": "NO_ELIGIBLE_CANDIDATE_COMBINATION"}, failure_class=FailureClass.DETERMINISTIC_PROCESSING)
             report["scene_qa"] = final_scene_audit.to_dict()
@@ -568,13 +749,13 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             candidate, _result = chosen
             option = next(item for item in options if item["candidate"].candidate_id == candidate.candidate_id)
             chosen_options[line.id] = option
-            row.update({"status": "FINAL_PASS", "candidate_id": candidate.candidate_id, "output": option["mounted_path"], "processing_hash": option["processing_hash"], "qa": option["mounted_audit"].result.to_dict()})
+            row.update({"status": "FINAL_PASS", "candidate_id": candidate.candidate_id, "output": option["mounted_path"], "processing_hash": option["processing_hash"], "qa": option["mounted_audit"].result.to_dict(), "selected_candidate_linguistic_decision": option["mounted_audit"].diagnostics.get("linguistic_decision")})
         final_scene_audit = _aggregate_line_scene_audit(report["lines"])
         report["scene_qa"] = final_scene_audit.to_dict()
         stage_counts["SCENE_QA"] = 1
 
     report["stage_evidence"]["SCENE_QA"] = {"status": "EXECUTED" if stage_counts["SCENE_QA"] else "NOT_RUN", "artifact_count": stage_counts["SCENE_QA"], "passed": final_scene_audit.passed}
-    for stage in ("PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "SCENE_QA"):
+    for stage in ("PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "LINGUISTIC_ALIGNMENT", "SCENE_QA"):
         if stage_counts[stage] and stage not in report["phases"]:
             report["phases"].append(stage)
     report["pass"] = bool(final_scene_audit.passed and not report["blockers"] and all(row_by_id[line.id].get("status") not in {"UNPROVEN_HOLD", BLOCKED} for line in scene.lines))

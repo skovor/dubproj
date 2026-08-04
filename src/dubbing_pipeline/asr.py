@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from .contracts import EvidenceFamily, EvidenceRecord
 from .hashing import atomic_json, canonical_json, contract_hash, sha256_bytes, sha256_file
 
 
@@ -31,12 +32,15 @@ class ForcedAligner(Protocol):
 class FasterWhisperBackend:
     """Lazy faster-whisper adapter; model stays alive for one QA round."""
 
-    def __init__(self, model_size: str = "large-v3-turbo", *, device: str = "cuda", compute_type: str = "float16"):
+    def __init__(self, model_size: str = "large-v3-turbo", *, device: str = "cuda", compute_type: str = "float16", model_revision: str = "unknown"):
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
             raise RuntimeError("install the optional qa dependencies") from exc
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        self.backend_id = f"faster-whisper-{model_size}"
+        self.model_id = model_size
+        self.model_revision = model_revision
 
     backend_id = "faster-whisper-large-v3-turbo"
 
@@ -67,6 +71,11 @@ class ASRReading:
     audio_sha256: str
     evidence_hash: str
     cache_hit: bool = False
+    evidence_family: EvidenceFamily | str = EvidenceFamily.WHISPER_ASR
+    backend_id: str = "unknown"
+    model_id: str = "unknown"
+    model_revision: str = "unknown"
+    semantic_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,7 +87,43 @@ class ASRReading:
             "audio_sha256": self.audio_sha256,
             "evidence_hash": self.evidence_hash,
             "cache_hit": self.cache_hit,
+            "evidence_family": self.evidence_family.value if isinstance(self.evidence_family, EvidenceFamily) else str(self.evidence_family),
+            "backend_id": self.backend_id,
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "semantic_key": self.semantic_key,
+            "evidence_record": self.to_record().to_dict(),
         }
+
+    def to_record(self) -> EvidenceRecord:
+        evidence_hash = self.evidence_hash or contract_hash(
+            "asr-reading-v4",
+            {
+                "mode": self.mode,
+                "text": self.text,
+                "language": self.language,
+                "probability": self.probability,
+                "segments": self.segments,
+                "audio_sha256": self.audio_sha256,
+                "backend_id": self.backend_id,
+                "model_id": self.model_id,
+                "model_revision": self.model_revision,
+                "semantic_key": self.semantic_key,
+            },
+        )
+        return EvidenceRecord(
+            evidence_id=evidence_hash,
+            evidence_family=self.evidence_family,
+            backend_id=self.backend_id,
+            model_id=self.model_id,
+            model_revision=self.model_revision,
+            mode=self.mode,
+            audio_sha256=self.audio_sha256,
+            semantic_key=self.semantic_key,
+            output={"text": self.text, "language": self.language, "segments": self.segments},
+            confidence=self.probability,
+            evidence_hash=evidence_hash,
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any], *, audio_sha256: str | None = None, cache_hit: bool = True) -> "ASRReading":
@@ -91,6 +136,11 @@ class ASRReading:
             audio_sha256=str(audio_sha256 or value.get("audio_sha256", "")),
             evidence_hash=str(value.get("evidence_hash", "")),
             cache_hit=cache_hit,
+            evidence_family=value.get("evidence_family", EvidenceFamily.WHISPER_ASR),
+            backend_id=str(value.get("backend_id", "unknown")),
+            model_id=str(value.get("model_id", "unknown")),
+            model_revision=str(value.get("model_revision", "unknown")),
+            semantic_key=value.get("semantic_key"),
         )
 
 
@@ -128,6 +178,7 @@ class DualASREvidence:
             "target_language": self.target_language,
             "forced_target": self.forced_target.to_dict(),
             "automatic": self.automatic.to_dict(),
+            "evidence_records": [self.forced_target.to_record().to_dict(), self.automatic.to_record().to_dict()],
             "semantic_key": self.semantic_key,
             "evidence_hashes": self.evidence_hashes,
         }
@@ -136,17 +187,19 @@ class DualASREvidence:
 class ASRCache:
     """Memory/disk cache keyed by artifact SHA, decode mode and backend."""
 
-    def __init__(self, root: str | Path | None = None, *, backend_id: str = "unknown") -> None:
+    def __init__(self, root: str | Path | None = None, *, backend_id: str = "unknown", model_id: str = "unknown", model_revision: str = "unknown") -> None:
         self.root = Path(root) if root is not None else None
         self.backend_id = backend_id
+        self.model_id = model_id
+        self.model_revision = model_revision
         self._readings: dict[str, dict[str, Any]] = {}
         self._semantic: dict[str, dict[str, Any]] = {}
 
     def _key(self, audio_sha256: str, mode: str, language: str | None) -> str:
-        return sha256_bytes(canonical_json({"audio_sha256": audio_sha256, "mode": mode, "language": language, "backend": self.backend_id}))
+        return sha256_bytes(canonical_json({"audio_sha256": audio_sha256, "mode": mode, "language": language, "backend": self.backend_id, "model_id": self.model_id, "model_revision": self.model_revision}))
 
     def _semantic_key(self, semantic_key: str, mode: str, language: str | None) -> str:
-        return sha256_bytes(canonical_json({"semantic_key": semantic_key, "mode": mode, "language": language, "backend": self.backend_id}))
+        return sha256_bytes(canonical_json({"semantic_key": semantic_key, "mode": mode, "language": language, "backend": self.backend_id, "model_id": self.model_id, "model_revision": self.model_revision}))
 
     def _path(self, key: str) -> Path | None:
         return self.root / f"{key}.json" if self.root is not None else None
@@ -195,6 +248,10 @@ def _backend_id(backend: Any) -> str:
     return str(getattr(backend, "backend_id", f"{backend.__class__.__module__}.{backend.__class__.__qualname__}"))
 
 
+def _backend_meta(backend: Any) -> tuple[str, str, str]:
+    return _backend_id(backend), str(getattr(backend, "model_id", "unknown")), str(getattr(backend, "model_revision", "unknown"))
+
+
 def _call_transcribe(backend: Any, path: str | Path, language: str | None) -> dict[str, Any]:
     """Support old test/adapters that only accept ``transcribe(path)``."""
     try:
@@ -208,7 +265,7 @@ def _call_transcribe(backend: Any, path: str | Path, language: str | None) -> di
     return {"text": str(value), "language": None, "probability": None, "segments": []}
 
 
-def _reading_from_value(value: Mapping[str, Any], *, mode: str, audio_sha256: str, cache_hit: bool) -> ASRReading:
+def _reading_from_value(value: Mapping[str, Any], *, mode: str, audio_sha256: str, cache_hit: bool, backend_id: str, model_id: str, model_revision: str, semantic_key: str | None) -> ASRReading:
     payload = {
         "mode": mode,
         "text": str(value.get("text", "")),
@@ -216,7 +273,7 @@ def _reading_from_value(value: Mapping[str, Any], *, mode: str, audio_sha256: st
         "probability": value.get("probability"),
         "segments": [dict(item) for item in value.get("segments", [])],
     }
-    evidence_hash = contract_hash("asr-reading-v3", {**payload, "audio_sha256": audio_sha256})
+    evidence_hash = contract_hash("asr-reading-v4", {**payload, "audio_sha256": audio_sha256, "backend_id": backend_id, "model_id": model_id, "model_revision": model_revision, "semantic_key": semantic_key})
     return ASRReading(
         mode=mode,
         text=payload["text"],
@@ -226,6 +283,11 @@ def _reading_from_value(value: Mapping[str, Any], *, mode: str, audio_sha256: st
         audio_sha256=audio_sha256,
         evidence_hash=evidence_hash,
         cache_hit=cache_hit,
+        evidence_family=EvidenceFamily.WHISPER_ASR,
+        backend_id=backend_id,
+        model_id=model_id,
+        model_revision=model_revision,
+        semantic_key=semantic_key,
     )
 
 
@@ -240,9 +302,14 @@ def transcribe_dual(
 ) -> DualASREvidence:
     """Collect forced-target and automatic-language evidence exactly once."""
     audio_sha256 = sha256_file(path)
-    cache = cache or ASRCache(backend_id=_backend_id(backend))
+    backend_id, model_id, model_revision = _backend_meta(backend)
+    cache = cache or ASRCache(backend_id=backend_id, model_id=model_id, model_revision=model_revision)
     if cache.backend_id == "unknown":
-        cache.backend_id = _backend_id(backend)
+        cache.backend_id = backend_id
+    if cache.model_id == "unknown":
+        cache.model_id = model_id
+    if cache.model_revision == "unknown":
+        cache.model_revision = model_revision
 
     def one(mode: str, language: str | None) -> ASRReading:
         value = cache.get(audio_sha256, mode, language)
@@ -255,7 +322,7 @@ def transcribe_dual(
             cache.put(audio_sha256, mode, language, value)
             if semantic_key:
                 cache.put_semantic(semantic_key, mode, language, value)
-        return _reading_from_value(value, mode=mode, audio_sha256=audio_sha256, cache_hit=cache_hit)
+        return _reading_from_value(value, mode=mode, audio_sha256=audio_sha256, cache_hit=cache_hit, backend_id=backend_id, model_id=model_id, model_revision=model_revision, semantic_key=semantic_key)
 
     forced = one("forced_target", target_language)
     automatic = one("automatic", None)
@@ -267,6 +334,7 @@ class WhisperXEscalationRequest:
     """Serializable request prepared for a future selective WhisperX/MFA pass."""
 
     audio_path: str
+    candidate_id: str | None
     expected_text: str
     source_text: str
     language: str
@@ -276,6 +344,7 @@ class WhisperXEscalationRequest:
     def to_dict(self) -> dict[str, Any]:
         return {
             "audio_path": self.audio_path,
+            "candidate_id": self.candidate_id,
             "expected_text": self.expected_text,
             "source_text": self.source_text,
             "language": self.language,
@@ -289,6 +358,7 @@ class WhisperXEscalationRequest:
 def prepare_whisperx_escalation(
     path: str | Path,
     *,
+    candidate_id: str | None = None,
     expected_text: str,
     source_text: str = "",
     language: str = "de",
@@ -296,7 +366,7 @@ def prepare_whisperx_escalation(
     evidence_hashes: list[str] | tuple[str, ...] = (),
 ) -> WhisperXEscalationRequest:
     """Create an escalation request without loading or running WhisperX."""
-    return WhisperXEscalationRequest(str(path), expected_text, source_text, language, reason, tuple(evidence_hashes))
+    return WhisperXEscalationRequest(str(path), candidate_id, expected_text, source_text, language, reason, tuple(evidence_hashes))
 
 
 @dataclass

@@ -1,32 +1,93 @@
-# Uncertainty-aware linguistic QA
+# Independent-evidence linguistic QA
 
-This commit changes the V2 linguistic verdict from one Whisper transcript to
-two cached readings of the same audio artifact:
+The V2 linguistic verdict is deliberately split into screening and
+confirmation.  Faster-Whisper is run twice on each candidate artifact:
 
-- `forced_target`: faster-whisper decoded with the configured target language.
-- `automatic`: faster-whisper decoded with automatic language detection.
+- `forced_target`: decode with the configured target language;
+- `automatic`: decode with automatic language detection.
 
-`content` and `final_word` remain exact ordered hard gates. The new layer does
-not accept a spelling error as a pass. It records both transcripts, language,
-probability, missing tokens, final anchors, and SHA-256 evidence hashes.
+Those readings are correlated evidence, not two independent votes.  They
+share the model, tokenizer, acoustic representation and failure modes, so they
+can produce `PASS_SCREENED`, `ASR_UNCERTAIN`, or `LANGUAGE_LEAK_SUSPECTED`, but
+they cannot by themselves produce a confirmed linguistic hard pass/fail.
 
-The statuses are explicit:
+## Evidence contract
 
-- `PASS_EXACT`: both readings agree on target content and the final anchor.
-- `FAIL_CONFIRMED`: both target-language readings miss required content.
-- `LANGUAGE_LEAK_CONFIRMED`: automatic evidence indicates source-language speech.
-- `ASR_UNCERTAIN`: the readings disagree or language confidence is insufficient.
+Every durable reading is represented by an `EvidenceRecord` containing the
+family, backend/model/revision, mode, artifact SHA-256, semantic alias, output,
+confidence and evidence hash.  The current families are:
 
-`ASR_UNCERTAIN` is a hold, not a regeneration trigger. The report emits a
-serializable `whisperx_escalation` request for selective forced alignment. No
-WhisperX or MFA model is loaded in this commit.
+- `WHISPER_ASR` — both forced and automatic Whisper modes;
+- `CTC_FORCED_ALIGNER` — WhisperX's wav2vec2/CTC alignment path;
+- `KALDI_FORCED_ALIGNER` — the optional MFA path for difficult cases;
+- `AUDIO_LANGUAGE_ID` — optional SpeechBrain VoxLingua107 spoken-language ID;
+- `HUMAN_REVIEW` — an explicit human decision.
 
-The cache is keyed by artifact SHA-256, decode mode, language, and backend. A
-semantic alias may be supplied only for a transform known to preserve speech
-(the V2 orchestrator uses it for resampling-only processing); mounted and
-speech-changing artifacts receive fresh evidence. Reopening the exact mounted
-file hits the SHA cache, so serialization QA does not transcribe again.
+A hard linguistic confirmation requires at least two distinct families.  The
+deterministic technical gates (corrupt audio, clipping, wrong sample rate,
+impossible window, and similar physical failures) remain independently
+decidable and do not need an acoustic-language second family.  Alignment/LID
+records whose artifact SHA does not match the Whisper artifact are rejected as
+`ALIGNMENT_UNCERTAIN` rather than being fused.
 
-The regression suite covers German Unicode normalization, forced/automatic ASR
-disagreement, source-language audio that is forced into German, cache reuse,
-and WhisperX request serialization.
+## Decision states
+
+| State | Meaning | OmniVoice retry? |
+| --- | --- | --- |
+| `PASS_SCREENED` | Both correlated Whisper readings match target text/final word and automatic language is target. | No; align the provisional winner. |
+| `PASS_CONFIRMED` | A second family confirms a screened candidate. | No. |
+| `PASS_PHONETIC` | A second family confirms target phonetic content after Whisper disagreement. | No. |
+| `ASR_UNCERTAIN` | Whisper evidence disagrees or is insufficient. | No; selective alignment/hold. |
+| `ALIGNMENT_UNCERTAIN` | Target/source alignment margin is inconclusive. | No; hold. |
+| `LANGUAGE_LEAK_SUSPECTED` | Whisper or CTC suggests source speech without independent confirmation. | No; hold/escalate. |
+| `LANGUAGE_LEAK_CONFIRMED` | CTC favors source text and independent LID agrees. | No; diagnose/regenerate explicitly. |
+| `LEXICAL_FAILURE_CONFIRMED` | Independent alignment rejects target without proving source language. | No; diagnose/regenerate explicitly. |
+| `ALIGNER_NOT_APPLICABLE` | No configured independent aligner. | No; never silently pass. |
+| `HUMAN_REVIEW` | Automated evidence cannot decide. | No; explicit review. |
+
+The old generic `PASS_EXACT` and `FAIL_CONFIRMED` labels are not emitted by
+the V2 linguistic layer: they hid whether the result was an actual second
+family confirmation and incorrectly treated two Whisper modes as independent.
+
+## Selective escalation
+
+The cost-controlled order is:
+
+1. technical QA + both Whisper modes for every candidate;
+2. rank provisional candidates and align only the provisional winner;
+3. align a fallback only when the winner is rejected or ambiguous;
+4. for source-preferred alignment, optionally run independent VoxLingua107
+   LID; reserve MFA for persistent difficult cases.
+
+The CTC adapter aligns the known German subtitle and the original English
+subtitle contrastively.  It never asks WhisperX to transcribe again.  A strong
+German score and positive margin can produce `PASS_CONFIRMED` or
+`PASS_PHONETIC`; a strong English score without independent LID remains
+`LANGUAGE_LEAK_SUSPECTED`; a narrow margin produces `ALIGNMENT_UNCERTAIN`.
+
+The line report is candidate-aware (`candidate_linguistic_decisions`,
+`line_linguistic_summary`, and `selected_candidate_linguistic_decision`).  An
+escalation record includes the candidate ID, so a weak first take cannot mask a
+good second take.
+
+## Cache boundaries
+
+Whisper and CTC caches include artifact SHA-256, mode/text, language, backend,
+model and revision.  A semantic alias is used by the orchestrator only for an
+explicit resample known to preserve speech.  Trim, atempo/time-stretch,
+montage, splicing, mixing, or any other speech-changing transform has no
+semantic alias and therefore gets fresh evidence.  Alignment cache entries
+are separately keyed by audio SHA, hypothesis text, language and model
+revision.
+
+## Optional dependencies
+
+Install `generic-dubbing-pipeline[alignment]` to enable WhisperX and
+SpeechBrain adapters.  The core package remains importable without them; if no
+aligner is configured, candidates are held as `ALIGNER_NOT_APPLICABLE` rather
+than being marked PASS or regenerated as if a linguistic failure were proven.
+
+The regression suite covers correlated Whisper failures, CTC confirmation,
+source-language confirmation requiring independent LID, missing aligners,
+candidate-specific reporting, alignment caching, and the no-retry scheduler
+policy.

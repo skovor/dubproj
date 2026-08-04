@@ -21,6 +21,15 @@ hash-only baseline in the external sandbox.
   level, tail, content order, final-word suffix and source-language leakage.
   Missing ASR is `NOT_RUN`, never a fabricated PASS. Ranking cannot rescue a
   failed candidate.
+- Linguistic QA now records evidence families. Forced-target Whisper and
+  automatic Whisper are correlated `WHISPER_ASR` screening, never two
+  independent votes. `PASS_SCREENED` is promoted only by selective
+  `CTC_FORCED_ALIGNER`/`KALDI_FORCED_ALIGNER` evidence; source-language
+  confirmation can additionally require independent `AUDIO_LANGUAGE_ID`.
+  WhisperX alignment compares the known target and source subtitle texts and
+  does not perform a third Whisper transcription. If the second family is
+  unavailable or inconclusive, the candidate is held rather than passed or
+  regenerated.
 - `post_qa.py` makes the delivery boundary explicit: every raw candidate is
   re-audited after processing, after surgical mounting, and after reopening
   the serialized artifact. FMV scenes receive a final full-scene audit that
@@ -30,7 +39,9 @@ hash-only baseline in the external sandbox.
 - `orchestration_v2.py` selects line-separated winners only after serialized
   QA and selects FMV winners from bounded candidate combinations that pass the
   complete scene audit. Failed post-transform stages remain in the report as
-  stage evidence instead of silently disappearing.
+  stage evidence instead of silently disappearing. Candidate linguistic
+  summaries and selective alignment requests are candidate-specific; no
+  `raw_rows[0]` value acts as line authority.
 - `montage.py` replaces only the declared speech mask, preserves Empalme B
   intervals and resume tails, keeps non-dialogue channels sample-identical and
   rejects a body that would be actively cut.

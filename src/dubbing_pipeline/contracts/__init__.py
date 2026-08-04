@@ -37,6 +37,72 @@ class FailureClass(str, enum.Enum):
     RUNTIME_FAILURE = "RUNTIME_FAILURE"
 
 
+class EvidenceFamily(str, enum.Enum):
+    """Families are independent only when their acoustic/model path differs."""
+
+    WHISPER_ASR = "WHISPER_ASR"
+    CTC_FORCED_ALIGNER = "CTC_FORCED_ALIGNER"
+    KALDI_FORCED_ALIGNER = "KALDI_FORCED_ALIGNER"
+    AUDIO_LANGUAGE_ID = "AUDIO_LANGUAGE_ID"
+    HUMAN_REVIEW = "HUMAN_REVIEW"
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    """Auditable output of one evidence family and one decode/alignment mode."""
+
+    evidence_id: str
+    evidence_family: EvidenceFamily | str
+    backend_id: str
+    model_id: str
+    model_revision: str
+    mode: str
+    audio_sha256: str
+    semantic_key: str | None
+    output: Any
+    confidence: float | None
+    evidence_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.evidence_id or not self.backend_id or not self.mode or not self.audio_sha256:
+            raise ContractError("evidence record identity fields must be non-empty")
+        if not isinstance(self.evidence_family, EvidenceFamily):
+            object.__setattr__(self, "evidence_family", EvidenceFamily(str(self.evidence_family)))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "evidence_id": self.evidence_id,
+            "evidence_family": self.evidence_family.value,
+            "backend_id": self.backend_id,
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "mode": self.mode,
+            "audio_sha256": self.audio_sha256,
+            "semantic_key": self.semantic_key,
+            "output": self.output,
+            "confidence": self.confidence,
+            "evidence_hash": self.evidence_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EvidenceRecord":
+        known = {"evidence_id", "evidence_family", "backend_id", "model_id", "model_revision", "mode", "audio_sha256", "semantic_key", "output", "confidence", "evidence_hash"}
+        _unknown(value, known, "evidence")
+        return cls(
+            evidence_id=str(_required(value, "evidence_id")),
+            evidence_family=EvidenceFamily(str(_required(value, "evidence_family"))),
+            backend_id=str(_required(value, "backend_id")),
+            model_id=str(_required(value, "model_id")),
+            model_revision=str(value.get("model_revision", "unknown")),
+            mode=str(_required(value, "mode")),
+            audio_sha256=str(_required(value, "audio_sha256")),
+            semantic_key=value.get("semantic_key"),
+            output=value.get("output"),
+            confidence=float(value["confidence"]) if value.get("confidence") is not None else None,
+            evidence_hash=str(_required(value, "evidence_hash")),
+        )
+
+
 def _required(value: Mapping[str, Any], key: str) -> Any:
     if key not in value or value[key] in (None, ""):
         raise ContractError(f"missing required field: {key}")
@@ -258,4 +324,4 @@ def serialize_roundtrip(value: Any) -> Any:
     raise TypeError(f"not a V2 contract: {type(value)!r}")
 
 
-__all__ = ["AudioArtifact", "CandidateArtifact", "ContractError", "DeliveryWindow", "FailureClass", "GateEvidence", "GateStatus", "ReferenceEvidence", "RunState", "gate_passes"]
+__all__ = ["AudioArtifact", "CandidateArtifact", "ContractError", "DeliveryWindow", "EvidenceFamily", "EvidenceRecord", "FailureClass", "GateEvidence", "GateStatus", "ReferenceEvidence", "RunState", "gate_passes"]
