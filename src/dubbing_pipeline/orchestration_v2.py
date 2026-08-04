@@ -6,7 +6,6 @@ scene have all passed their own evidence-backed audits.
 """
 from __future__ import annotations
 
-import itertools
 import re
 from pathlib import Path
 from typing import Any
@@ -29,6 +28,8 @@ from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2, is_provis
 from .reference import materialize_reference
 from .runtime_lock import assert_backend_matches_lock, assert_reproducible
 from .scheduler import run_cohorts
+from .fmv_selector import select_local_scene
+from .scene_qa import build_candidate_matrix
 
 
 def _line_window(line: Line, sample_rate: int, scene_id: str, channel: int) -> DeliveryWindow:
@@ -729,43 +730,25 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     chosen_options: dict[str, dict[str, Any]] = {}
     final_scene_audit: StageAudit
     if scene.topology == "EMBEDDED_FMV":
-        eligible_lists = []
-        missing = False
-        for line in generable_lines:
-            eligible = [option for option in options_by_line[line.id] if option["eligible"]]
-            eligible.sort(key=lambda option: rank_candidate_v2(option["mounted_audit"].result), reverse=True)
-            if not eligible:
-                missing = True
-            eligible_lists.append(eligible[: max(1, int(getattr(config, "scene_candidate_options", 8)))])
-        selected_working = source_array.copy() if not generable_lines else None
-        combo_audit = None
-        max_combinations = max(1, int(getattr(config, "scene_selection_max_combinations", 64)))
-        if not missing and eligible_lists:
-            for combo_index, combo in enumerate(itertools.product(*eligible_lists), start=1):
-                if combo_index > max_combinations:
-                    break
-                working = source_array.copy()
-                combo_failed = None
-                for line, option in zip(generable_lines, combo):
-                    try:
-                        window = _line_window(line, stem_rate, scene.id, scene.dialogue_channel)
-                        generated, generated_rate = read(option["processed_path"], always_2d=True)
-                        working, _ = mount_surgical(working, generated, generated_rate, window, stem_rate, empalme_b=bool(line.preserved_source_intervals or line.source_resume is not None))
-                    except Exception as exc:
-                        combo_failed = str(exc)
-                        break
-                if combo_failed:
-                    continue
-                attempt_path = out / "scene_candidates" / f"combination_{combo_index:03d}.mounted.wav"
-                persist_audio_atomic(attempt_path, working, stem_rate)
-                protected_ok, untouched_ok, integrity = _scene_integrity(source_array, working, scene.lines, scene, stem_rate)
-                stage_counts["SCENE_QA"] += 1
-                combo_audit = audit_scene_stage(attempt_path, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok)
-                combo_audit.diagnostics.update({"combination": combo_index, "integrity": integrity})
-                if combo_audit.passed:
-                    selected_working = working
-                    chosen_options = {line.id: option for line, option in zip(generable_lines, combo)}
-                    break
+        def _mount(working, line, option):
+            window = _line_window(line, stem_rate, scene.id, scene.dialogue_channel)
+            generated, generated_rate = read(option["processed_path"], always_2d=True)
+            mounted, _ = mount_surgical(working, generated, generated_rate, window, stem_rate, empalme_b=bool(line.preserved_source_intervals or line.source_resume is not None))
+            return mounted
+        def _audit(working, index):
+            attempt_path = out / "scene_candidates" / f"local_{index:03d}.mounted.wav"
+            persist_audio_atomic(attempt_path, working, stem_rate)
+            protected_ok, untouched_ok, integrity = _scene_integrity(source_array, working, scene.lines, scene, stem_rate)
+            stage_counts["SCENE_QA"] += 1
+            audit = audit_scene_stage(attempt_path, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok)
+            audit.diagnostics.update({"selection_strategy":"LOCAL_SCENE_REPAIR","local_attempt":index,"integrity":integrity})
+            return audit.passed, audit
+        local = select_local_scene(generable_lines, options_by_line, source_array, max_candidates_per_line=int(getattr(config,"scene_candidate_options",8)), max_iterations=max(1,int(getattr(config,"scene_selection_max_combinations",64))), mount_line=_mount, audit_scene=_audit, rank=lambda option: rank_candidate_v2(option["mounted_audit"].result))
+        selected_working = local.working if local.passed else (source_array.copy() if not generable_lines else None)
+        combo_audit = local.audit
+        chosen_options = local.selected if local.passed else {}
+        report["fmv_candidate_matrix"] = build_candidate_matrix(generable_lines, options_by_line)
+        report["fmv_local_selection"] = {"passed":local.passed,"attempts":local.attempts,"diagnostics":local.matrix}
         if selected_working is not None:
             mounted_output = out / f"{scene.id}.mounted.wav"
             persist_audio_atomic(mounted_output, selected_working, stem_rate)
