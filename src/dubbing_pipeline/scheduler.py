@@ -11,6 +11,24 @@ from .telemetry import TelemetryCollector
 PHASES = ("PREFLIGHT", "PLAN", "GENERATE_INITIAL_COHORT", "SEAL_GENERATION_MANIFEST", "RELEASE_OMNIVOICE", "QA_INITIAL_COHORT", "RETRY_PLAN", "GENERATE_RETRY_COHORT", "QA_RETRY_COHORT", "SELECT_WINNERS", "MOUNT_SCENES", "SERIALIZATION_AUDIT", "CONTINUOUS_AUDIT", "PACKAGE", "PACKAGE_ROUNDTRIP", "DEPLOY_TRANSACTION", "RUNTIME_SMOKE")
 
 
+class QALevel:
+    TECHNICAL = 0
+    WHISPER_DUAL = 1
+    CTC_WINNER = 2
+    CTC_LID_SECOND = 3
+    MFA_PERFORMANCE = 4
+
+
+def route_qa(*, technical_passed: bool, provisional_status: str | None = None, candidate_count: int = 1, lid_available: bool = False, mfa_requested: bool = False) -> list[int]:
+    """Return the cheapest evidence path that can resolve the current state."""
+    if not technical_passed: return [QALevel.TECHNICAL]
+    levels = [QALevel.WHISPER_DUAL]
+    if provisional_status in {"PASS_SCREENED", "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK", "ASR_UNCERTAIN"}: levels.append(QALevel.CTC_WINNER)
+    if candidate_count > 1 and lid_available: levels.append(QALevel.CTC_LID_SECOND)
+    if mfa_requested: levels.append(QALevel.MFA_PERFORMANCE)
+    return levels
+
+
 @dataclass
 class CohortReport:
     run_id: str
