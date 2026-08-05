@@ -68,8 +68,8 @@ escena del juego.
 ## CI provenance update
 
 The immutable CI evidence recorded in `src/artifacts/final_verification/report.json`
-is GitHub Actions run `31039137909` (job `92418905970`) at checkout
-`9b8822478c21337478c49533ef3a2963f0d518a3`, with conclusion `success` and artifact
-digest `sha256:127b3559a68fd19318dcf344ee42e8979f0dc9cba81520e98aae766fe0e33d49`.
-The hardened workflow introduced after that run must be validated by a new run;
-the old run is never retroactively relabeled as evidence for new workflow code.
+is GitHub Actions run `31041358093` (job `92426223541`) at checkout
+`878c140a05d0184b2f86bde745556725698209c0`, with conclusion `success` and artifact
+digest `sha256:4345e124c090361ee7637099db6aa88a6ffb2917c4f756493b4d97f0a7e4655e`.
+That run validates the hardened core/platform workflow. The optional ML import job
+is manual and remains explicitly unverified until dispatched.

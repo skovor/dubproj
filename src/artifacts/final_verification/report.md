@@ -25,14 +25,14 @@ El run independiente de GitHub Actions que respalda el checkout anterior es:
 | Campo | Valor |
 |---|---|
 | Workflow | `.github/workflows/ci.yml` |
-| Workflow commit observado | `dc5cdeb727290426e1f1f180710b4d4478a0372b` |
-| Checkout probado | `9b8822478c21337478c49533ef3a2963f0d518a3` |
-| Run / job | `31039137909` / `92418905970` |
+| Workflow commit observado | `878c140a05d0184b2f86bde745556725698209c0` |
+| Checkout probado | `878c140a05d0184b2f86bde745556725698209c0` |
+| Run / job | `31041358093` / `92426223541` |
 | Estado | `completed / success` |
 | Runner / Python | `ubuntu-24.04` / `3.12.13` |
 | Pytest | `112 passed` |
-| Artefacto / digest | `8943859065` / `sha256:127b3559a68fd19318dcf344ee42e8979f0dc9cba81520e98aae766fe0e33d49` |
-| Observado | `2026-08-05T19:24:17Z` |
+| Artefacto / digest | `8944711017` / `sha256:4345e124c090361ee7637099db6aa88a6ffb2917c4f756493b4d97f0a7e4655e` |
+| Observado | `2026-08-05T19:52:55Z` |
 
 Las identidades tienen funciones distintas: `validated_code_commit` es el último
 commit que modificó el runtime auditado; `workflow_commit` identifica la definición
@@ -40,8 +40,10 @@ CI usada por la ejecución registrada; `evidence_head_sha` es el checkout exacto
 Actions probó. No se utiliza un booleano mutable como `observed_github_run`: una
 ejecución futura siempre debe registrarse como una nueva evidencia.
 
-El workflow endurecido en el commit actual todavía necesita su propia ejecución.
-El run anterior no se reutiliza retroactivamente para afirmar que probó esos cambios.
+La ejecución #38 sí probó el workflow endurecido: acciones fijadas por SHA,
+constraints, entornos aislados, artefactos obligatorios y la matriz Ubuntu/Windows
+con Python 3.10/3.12. El job `ml-import-contracts` es manual y quedó `skipped` en
+esta ejecución; no se presenta como evidencia ML.
 
 ## Alcance real del CI
 
