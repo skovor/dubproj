@@ -64,3 +64,12 @@ La carga real del checkpoint descargado sí fue verificada aparte: OmniVoice loc
 `c5fdb5ccb189668d56333f77ba2629f4cd7535f4` cargó en `cuda:0`/`float16` en 2.217 s;
 FFmpeg local pasó el smoke de seno con código 0. Eso valida el entorno, no una
 escena del juego.
+
+## CI provenance update
+
+The immutable CI evidence recorded in `src/artifacts/final_verification/report.json`
+is GitHub Actions run `31039137909` (job `92418905970`) at checkout
+`9b8822478c21337478c49533ef3a2963f0d518a3`, with conclusion `success` and artifact
+digest `sha256:127b3559a68fd19318dcf344ee42e8979f0dc9cba81520e98aae766fe0e33d49`.
+The hardened workflow introduced after that run must be validated by a new run;
+the old run is never retroactively relabeled as evidence for new workflow code.

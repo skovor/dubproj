@@ -1,0 +1,28 @@
+# Core CI constraints. These versions are compatible with Python 3.10/3.12
+# and are intentionally separate from the optional ML stack. Refresh this
+# file only with a recorded pip-freeze and a new CI evidence run.
+setuptools==75.8.0
+wheel==0.45.1
+numpy==1.26.4
+scipy==1.14.1
+librosa==0.10.2.post1
+soundfile==0.12.1
+audioread==3.0.1
+soxr==0.5.0.post1
+numba==0.61.2
+llvmlite==0.44.0
+joblib==1.4.2
+decorator==5.1.1
+pooch==1.8.2
+platformdirs==4.3.6
+lazy-loader==0.4
+packaging==24.2
+cffi==1.17.1
+pycparser==2.22
+pytest==8.3.5
+coverage==7.6.10
+iniconfig==2.0.0
+pluggy==1.5.0
+pygments==2.19.1
+colorama==0.4.6
+typing_extensions==4.12.2

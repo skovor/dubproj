@@ -16,8 +16,20 @@ def run(command: list[str], cwd: Path) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(); parser.add_argument("--out", required=True); args = parser.parse_args(); root = Path(__file__).resolve().parents[1]
-    checks = [run([sys.executable, "-m", "compileall", "-q", "."], root), run([sys.executable, "-m", "pytest", "-q"], root), run([sys.executable, "tests/run_smoke.py"], root), run([sys.executable, "tests/run_v2.py"], root), run([sys.executable, "scripts/check_port.py"], root), run([sys.executable, "scripts/validate_instructions.py"], root)]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--skip-pytest", action="store_true", help="Do not duplicate a pytest run already executed by the caller")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    checks = [run([sys.executable, "-m", "compileall", "-q", "."], root)]
+    if not args.skip_pytest:
+        checks.append(run([sys.executable, "-m", "pytest", "-q"], root))
+    checks.extend([
+        run([sys.executable, "tests/run_smoke.py"], root),
+        run([sys.executable, "tests/run_v2.py"], root),
+        run([sys.executable, "scripts/check_port.py"], root),
+        run([sys.executable, "scripts/validate_instructions.py"], root),
+    ])
     report = {"schema": "v2-release-check-v1", "status": "PASS" if all(item["returncode"] == 0 for item in checks) else "FAIL", "checks": checks}
     Path(args.out).parent.mkdir(parents=True, exist_ok=True); Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); print(json.dumps(report, ensure_ascii=False, indent=2)); return 0 if report["status"] == "PASS" else 1
 

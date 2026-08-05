@@ -6,8 +6,33 @@
     "workflow": ".github/workflows/ci.yml",
     "workflow_commit": "dc5cdeb727290426e1f1f180710b4d4478a0372b",
     "configured": true,
-    "observed_github_run": false,
-    "note": "Workflow was pushed; an independent GitHub-hosted run must appear before CI evidence is claimed."
+    "evidence_head_sha": "9b8822478c21337478c49533ef3a2963f0d518a3",
+    "run_id": 31039137909,
+    "run_number": 36,
+    "job_id": 92418905970,
+    "status": "completed",
+    "conclusion": "success",
+    "runner": "ubuntu-24.04",
+    "python": "3.12.13",
+    "pytest_result": "112 passed",
+    "release_gates": "success",
+    "artifact_id": 8943859065,
+    "artifact_name": "release-check-31039137909",
+    "artifact_sha256": "127b3559a68fd19318dcf344ee42e8979f0dc9cba81520e98aae766fe0e33d49",
+    "observed_at": "2026-08-05T19:24:17Z",
+    "scope": {
+      "core_contracts": "VERIFIED",
+      "optional_ml_backends": "NOT_RUN",
+      "local_gpu_model_load": "VERIFIED",
+      "real_game_audio": "BLOCKED"
+    },
+    "hardened_workflow_status": "PENDING_NEW_RUN",
+    "identity_policy": {
+      "validated_code_commit": "last commit that changed audited runtime code",
+      "workflow_commit": "commit that introduced the workflow used for the recorded run",
+      "evidence_head_sha": "exact checkout tested by the recorded GitHub run"
+    },
+    "note": "This immutable run documents the prior core workflow. The hardened workflow in the current commit requires a new run; its result must be recorded as a separate evidence object, never by mutating this run."
   },
   "branch": "refactor/p3r-pipeline-v2",
   "audit_spec": "docs/AUDITORIA_PROFUNDA_DUBPROJ_27ca23e.md",
