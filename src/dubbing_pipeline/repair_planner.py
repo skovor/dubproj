@@ -11,6 +11,7 @@ def plan_repairs(cause: FailureCause | str, diagnostics: dict[str, Any] | None =
     if cause is FailureCause.SEAM_FAIL: return [RepairAction("surgical_crossfade",cause,{"max_ms":80},False,1,"recompute seam")]
     if cause is FailureCause.REFERENCE_LIMITED: return [RepairAction("materialize_new_reference",cause,{"source":"validated-source"},False,1,"reference evidence first")]
     if cause is FailureCause.LANGUAGE_LEAK_CONFIRMED: return [RepairAction("regenerate_target_language",cause,{"language":"de","append_ellipsis":True},True,2,"independent leak evidence")]
+    if cause is FailureCause.LANGUAGE_LEAK_SUSPECTED: return [RepairAction("hold_language_review",cause,{"requires":"independent_lid_or_human"},False,0,"suspected leak is not sufficient evidence for TTS")]
     return [RepairAction("hold_for_evidence",cause,{"reason":"no TTS retry"},False,0,"configuration/evidence issue")]
 
 __all__=["plan_repairs"]

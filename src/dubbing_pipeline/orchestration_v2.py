@@ -37,7 +37,7 @@ from .performance_policy import policy_for
 from .model_pool import ModelIdentity, ModelPool
 from .state import StateStore
 from .attempts import AttemptStore
-from .repair import FailureCause, apply_repair
+from .repair import FailureCause, apply_repair, re_audit_repair
 from .repair_planner import plan_repairs
 
 
@@ -318,7 +318,7 @@ def _aggregate_line_scene_audit(rows: list[dict[str, Any]]) -> StageAudit:
     return StageAudit(stage="SCENE_QA", passed=passed, qa_hash=qa_hash, diagnostics={"topology": "LINE_SEPARATED", "line_count": len(rows)})
 
 
-def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, mfa_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None, repair_executor: Any = None) -> dict[str, Any]:
+def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, mfa_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None, repair_executor: Any = None, repair_auditor: Any = None) -> dict[str, Any]:
     """Run one scene and select only candidates that survive delivery QA.
 
     Raw QA is deliberately a filter, not the final decision.  Every surviving
@@ -454,8 +454,10 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         status = str(decision.get("status") or option.get("alignment_status") or "")
         if status in {"ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "ASR_EVIDENCE_MISSING"}:
             cause = FailureCause.ASR_UNCERTAIN
-        elif status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION", "EVIDENCE_CONFLICT"}:
+        elif status == "LANGUAGE_LEAK_CONFIRMED":
             cause = FailureCause.LANGUAGE_LEAK_CONFIRMED
+        elif status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION", "EVIDENCE_CONFLICT"}:
+            cause = FailureCause.LANGUAGE_LEAK_SUSPECTED
         elif not bool(decision.get("final_anchor_present", True)):
             cause = FailureCause.FINAL_ANCHOR_MISSING
         else:
@@ -468,6 +470,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             return
         reference_hash = refs.get(line.id).audio_sha256 if refs.get(line.id) is not None else None
         outcome = apply_repair(action[0], line_id=line.id, input_audio_sha256=sha256_file(source_path), reference_sha256=reference_hash, store=repair_store, executor=repair_executor)
+        if repair_auditor is not None and outcome.diagnostics.get("output_audio_path"):
+            outcome = re_audit_repair(outcome, output_audio_path=outcome.diagnostics["output_audio_path"], auditor=repair_auditor)
         report["repair_attempts"].append({"line_id": line.id, "candidate_id": getattr(option.get("candidate"), "candidate_id", None), "cause": cause.value, "action": action[0].strategy, "outcome": outcome.status, "attempt_id": outcome.attempt_id, "diagnostics": outcome.diagnostics})
     stage_counts["RAW_TECHNICAL_QA"] = sum(len(value) for value in cohort.evaluations.values())
     report["stage_evidence"]["RAW_TECHNICAL_QA"] = {"status": "EXECUTED", "artifact_count": stage_counts["RAW_TECHNICAL_QA"]}
