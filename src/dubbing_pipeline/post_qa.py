@@ -17,6 +17,7 @@ from .contracts import FailureClass, GateEvidence, GateStatus
 from .hashing import contract_hash, sha256_file
 from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2
 from .performance_policy import policy_for
+from .scene_qa import audit_scene_windows
 
 
 POST_TRANSFORM_STAGES = (
@@ -227,6 +228,9 @@ def audit_scene_stage(
             valid=all(0 <= int(item.get("start", -1)) < int(item.get("end", -1)) <= len(audio) for item in ordered)
             valid=valid and all(int(left.get("end", 0)) <= int(right.get("start", 0)) for left, right in zip(ordered, ordered[1:]))
             gates["line_window_topology"] = GateEvidence("line_window_topology", GateStatus.PASS if valid else GateStatus.FAIL, measured_value=valid, details={"line_count": len(ordered)})
+            window_qa = audit_scene_windows(audio, sample_rate, ordered)
+            gates["line_window_activity"] = GateEvidence("line_window_activity", GateStatus.PASS if window_qa["all_lines_active"] else GateStatus.FAIL, measured_value=window_qa["failed_line_count"], threshold=0, units="lines", details={"failed_line_ids": window_qa["failed_line_ids"]})
+            gates["line_window_clipping"] = GateEvidence("line_window_clipping", GateStatus.PASS if not any(row["clipping_samples"] for row in window_qa["line_gate_results"]) else GateStatus.FAIL, measured_value=sum(row["clipping_samples"] for row in window_qa["line_gate_results"]), threshold=0, units="samples")
         gates["contextual_leak"] = GateEvidence("contextual_leak", GateStatus.NOT_APPLICABLE if contextual_leak is None else (GateStatus.FAIL if contextual_leak else GateStatus.PASS), measured_value=contextual_leak)
         if protected_intervals_ok is not None:
             gates["preserved_intervals"] = GateEvidence("preserved_intervals", GateStatus.PASS if protected_intervals_ok else GateStatus.FAIL, measured_value=protected_intervals_ok)
@@ -239,6 +243,8 @@ def audit_scene_stage(
         failures = [name for name, gate in gates.items() if gate.status is GateStatus.FAIL or gate.status is GateStatus.ERROR]
         passed = not failures and all(gate.status is not GateStatus.NOT_RUN for gate in gates.values())
         diagnostics = {"sample_rate": sample_rate, "frames": int(len(audio)), "channels": int(audio.shape[1]), "peak": peak, "clipping_samples": clipping, "rms_dbfs": 20.0 * float(np.log10(max(rms, 1e-12))), "failed_gates": failures}
+        if line_windows is not None:
+            diagnostics.update({"line_gate_results": window_qa["line_gate_results"], "failed_line_ids": window_qa["failed_line_ids"]})
         artifact_sha = sha256_file(path)
         qa_hash = contract_hash("qa-v2", {"stage": stage, "artifact_sha256": artifact_sha, "gates": {key: value.to_dict() for key, value in gates.items()}})
         return StageAudit(

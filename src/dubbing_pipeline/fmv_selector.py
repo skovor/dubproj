@@ -42,12 +42,14 @@ def select_local_scene(lines: Sequence[Any], options_by_line: Mapping[str, Seque
         diagnostics=getattr(last_audit,"diagnostics",{}) or {}
         culprit_ids=list(diagnostics.get("failed_line_ids") or ([diagnostics["failed_line_id"]] if diagnostics.get("failed_line_id") else []))
         if not culprit_ids:
+            culprit_ids=[str(row.get("line_id")) for row in (diagnostics.get("line_gate_results") or []) if row.get("passed") is False]
+        if not culprit_ids:
             culprit_ids=[line.id for line in lines if cursors[line.id] + 1 < len(lists[line.id])]
         culprit=next((line_id for line_id in culprit_ids if line_id in cursors and cursors[line_id] + 1 < len(lists[line_id])), None)
         if culprit is None:
             break
         old=selected[culprit]; cursors[culprit] += 1
-        matrix.append({"line_id":culprit,"candidate_id":getattr(old.get("candidate"),"candidate_id",None),"blocker":diagnostics.get("failed_gates") or diagnostics.get("reason") or "SCENE_QA_FAILED","action":"SUBSTITUTE_ATTRIBUTED_LINE","next_candidate_id":getattr(lists[culprit][cursors[culprit]].get("candidate"),"candidate_id",None)})
+        matrix.append({"line_id":culprit,"candidate_id":getattr(old.get("candidate"),"candidate_id",None),"failed_line_ids":culprit_ids,"blocker":diagnostics.get("failed_gates") or diagnostics.get("reason") or "SCENE_QA_FAILED","action":"SUBSTITUTE_ATTRIBUTED_LINE","next_candidate_id":getattr(lists[culprit][cursors[culprit]].get("candidate"),"candidate_id",None)})
     return LocalSelection(False,None,dict(selected),last_audit,attempts,matrix)
 
 __all__=["LocalSelection","select_local_scene"]
