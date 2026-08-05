@@ -27,4 +27,24 @@ class FMVTests(unittest.TestCase):
         self.assertEqual(result.selected["b"]["candidate"].candidate_id,"b1")
         self.assertTrue(any(row["action"] == "SUBSTITUTE_ATTRIBUTED_LINE" and row["line_id"] == "a" for row in result.matrix))
 
+    def test_non_monotonic_state_search_finds_a2_b1(self):
+        lines=[Line("a"),Line("b")]
+        options={"a":[{"candidate":type("C",(),{"candidate_id":"a1"})(),"eligible":True},{"candidate":type("C",(),{"candidate_id":"a2"})(),"eligible":True}],"b":[{"candidate":type("C",(),{"candidate_id":"b1"})(),"eligible":True},{"candidate":type("C",(),{"candidate_id":"b2"})(),"eligible":True}]}
+        def audit(value, _index):
+            ids=dict(value)
+            if ids == {"a":"a2", "b":"b1"}:
+                return True, type("Audit",(),{"diagnostics":{}})()
+            return False, type("Audit",(),{"diagnostics":{"failed_line_ids":["b"]}})()
+        result=select_local_scene(lines, options, [], max_candidates_per_line=2, max_iterations=4, mount_line=lambda value,line,option: {**dict(value), line.id: option["candidate"].candidate_id}, audit_scene=audit)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.selected["a"]["candidate"].candidate_id, "a2")
+        self.assertEqual(result.selected["b"]["candidate"].candidate_id, "b1")
+
+    def test_missing_attribution_is_bounded_and_fail_closed(self):
+        lines=[Line("a"),Line("b")]
+        options={line.id:[{"candidate":type("C",(),{"candidate_id":line.id+str(i)})(),"eligible":True} for i in (1,2)] for line in lines}
+        result=select_local_scene(lines, options, [], max_candidates_per_line=2, max_iterations=3, mount_line=lambda value,line,option: {**dict(value), line.id: option["candidate"].candidate_id}, audit_scene=lambda *_:(False, type("Audit",(),{"diagnostics":{}})()))
+        self.assertFalse(result.passed)
+        self.assertLessEqual(result.attempts, 3)
+
 if __name__=="__main__": unittest.main()
