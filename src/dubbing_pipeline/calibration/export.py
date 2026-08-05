@@ -4,6 +4,7 @@ import json, math
 from pathlib import Path
 from typing import Any, Mapping
 from .features import FEATURE_SCHEMA_VERSION, NORMALIZATION_VERSION
+from .lid_features import LID_FEATURE_SCHEMA_VERSION
 from .train import CalibrationArtifact
 
 def export_draft(artifact: CalibrationArtifact, path: str | Path) -> str:
@@ -15,7 +16,7 @@ def export_draft(artifact: CalibrationArtifact, path: str | Path) -> str:
 def load_draft(path: str | Path) -> dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if value.get("schema") != "platt-calibrator-v1" or value.get("status") != "DRAFT": raise ValueError("artifact is not a draft platt calibrator")
-    if value.get("feature_schema_version") not in {FEATURE_SCHEMA_VERSION, "final-anchor-v1", "lid-fusion-v1"} or value.get("normalization_version") != NORMALIZATION_VERSION: raise ValueError("calibration schema mismatch")
+    if value.get("feature_schema_version") not in {FEATURE_SCHEMA_VERSION, "final-anchor-v1", LID_FEATURE_SCHEMA_VERSION} or value.get("normalization_version") != NORMALIZATION_VERSION: raise ValueError("calibration schema mismatch")
     features = list(value.get("features") or []); coefficients = list(value.get("coefficients") or [])
     normalization = value.get("normalization")
     if len(features) != len(coefficients) or not isinstance(normalization, list) or len(normalization) != len(features) or not all(math.isfinite(float(x)) for x in coefficients + [value.get("intercept", 0.0)]): raise ValueError("invalid coefficients")

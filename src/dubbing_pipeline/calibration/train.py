@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Iterable
 from .features import FEATURE_SCHEMA_VERSION, NORMALIZATION_VERSION, FeatureRow
+from .lid_features import LID_FEATURE_SCHEMA_VERSION
 
 class CalibrationError(ValueError): pass
 
@@ -46,7 +47,14 @@ def train_calibrator(rows: Iterable[FeatureRow], *, kind: str, features: tuple[s
         weights = [value - learning_rate * grad / count for value, grad in zip(weights, grad_w)]
     probabilities = [_sigmoid(intercept + sum(weights[i] * ((value - means[i]) / scales[i]) for i, value in enumerate(row))) for row in matrix]
     brier = sum((p - label) ** 2 for p, label in zip(probabilities, labels)) / len(labels)
-    artifact_schema = "final-anchor-v1" if kind == "final_anchor" else FEATURE_SCHEMA_VERSION
+    if kind == "final_anchor":
+        artifact_schema = "final-anchor-v1"
+    elif kind == "lid":
+        artifact_schema = LID_FEATURE_SCHEMA_VERSION
+    elif kind == "target":
+        artifact_schema = FEATURE_SCHEMA_VERSION
+    else:
+        raise CalibrationError(f"unknown calibrator kind: {kind}")
     return CalibrationArtifact(kind, features, tuple(weights), intercept, tuple(zip(means, scales)), len(rows), len(groups), {"brier_score_training": brier}, dataset_sha256, feature_schema_version=artifact_schema)
 
 
