@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 from tempfile import TemporaryDirectory
 import json
 
@@ -89,8 +90,12 @@ def test_disabled_optional_mfa_is_valid_but_enabled_missing_ctc_is_blocked():
     assert disabled["status"] == "COMPLETE"
     assert validate_runtime_lock(disabled, strict=True, required_capabilities=disabled["capabilities"]) == []
     enabled = collect_runtime_lock(device="cpu", capabilities={"ctc_alignment": {"enabled": True, "requires": ["whisperx"]}})
-    assert enabled["status"] == "UNPROVISIONED"
-    assert any("whisperx" in item for item in validate_runtime_lock(enabled, strict=True, required_capabilities=enabled["capabilities"]))
+    if importlib.util.find_spec("whisperx") is None:
+        assert enabled["status"] == "UNPROVISIONED"
+        assert any("whisperx" in item for item in validate_runtime_lock(enabled, strict=True, required_capabilities=enabled["capabilities"]))
+    else:
+        assert enabled["status"] == "COMPLETE"
+        assert validate_runtime_lock(enabled, strict=True, required_capabilities=enabled["capabilities"]) == []
 
 
 def test_model_bytes_and_aggregate_are_verified_after_freeze():
