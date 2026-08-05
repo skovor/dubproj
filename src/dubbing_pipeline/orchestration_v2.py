@@ -1008,7 +1008,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             persist_audio_atomic(attempt_path, working, stem_rate)
             protected_ok, untouched_ok, integrity = _scene_integrity(source_array, working, scene.lines, scene, stem_rate)
             stage_counts["SCENE_QA"] += 1
-            audit = audit_scene_stage(attempt_path, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok, line_windows=scene_line_windows)
+            audit = audit_scene_stage(attempt_path, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok, line_windows=scene_line_windows, dialogue_channel=scene.dialogue_channel, source_audio=source_array, source_dialogue_channel=scene.dialogue_channel, require_mounted_delta_line_ids={line.id for line in generable_lines})
             audit.diagnostics.update({"selection_strategy":"LOCAL_SCENE_REPAIR","local_attempt":index,"integrity":integrity})
             return audit.passed, audit
         local = select_local_scene(generable_lines, options_by_line, source_array, max_candidates_per_line=int(getattr(config,"scene_candidate_options",8)), max_iterations=max(1,int(getattr(config,"scene_selection_max_combinations",64))), mount_line=_mount, audit_scene=_audit, rank=lambda option: rank_candidate_v2(option["mounted_audit"].result))
@@ -1021,7 +1021,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             mounted_output = out / f"{scene.id}.mounted.wav"
             persist_audio_atomic(mounted_output, selected_working, stem_rate)
             protected_ok, untouched_ok, integrity = _scene_integrity(source_array, selected_working, scene.lines, scene, stem_rate)
-            final_scene_audit = audit_scene_stage(mounted_output, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok, line_windows=scene_line_windows)
+            final_scene_audit = audit_scene_stage(mounted_output, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok, line_windows=scene_line_windows, dialogue_channel=scene.dialogue_channel, source_audio=source_array, source_dialogue_channel=scene.dialogue_channel, require_mounted_delta_line_ids={line.id for line in generable_lines})
             final_scene_audit.diagnostics.update({"integrity": integrity, "selected": True})
             report["mounted_output"] = str(mounted_output)
             report["scene_qa"] = final_scene_audit.to_dict()
