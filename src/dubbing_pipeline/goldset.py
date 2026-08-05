@@ -12,7 +12,7 @@ import json
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from .hashing import atomic_json, canonical_json, sha256_bytes, sha256_file
 
@@ -78,7 +78,8 @@ class ClipRecord:
 class HumanLabel:
     clip_id: str
     reviewer_id: str
-    label: str
+    label: str = ""
+    labels: tuple[str, ...] = ()
     severity: str = "unknown"
     region_start: float | None = None
     region_end: float | None = None
@@ -90,16 +91,25 @@ class HumanLabel:
     created_at: str = ""
 
     def __post_init__(self) -> None:
-        if self.label not in LABELS:
-            raise ValueError(f"unknown human label: {self.label}")
         if not _text(self.clip_id) or not _text(self.reviewer_id):
             raise ValueError("clip_id and reviewer_id are required")
+        selected = tuple(dict.fromkeys(str(item).strip() for item in self.labels if str(item).strip()))
+        if self.label.strip() and self.label not in selected:
+            selected = (self.label, *selected)
+        if not selected:
+            raise ValueError("at least one human label is required")
+        unknown = [item for item in selected if item not in LABELS]
+        if unknown:
+            raise ValueError(f"unknown human label: {unknown[0]}")
+        object.__setattr__(self, "labels", selected)
+        object.__setattr__(self, "label", selected[0])
         if self.region_start is not None and self.region_end is not None and self.region_end < self.region_start:
             raise ValueError("label region is reversed")
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["affected_tokens"] = list(self.affected_tokens)
+        result["labels"] = list(self.labels)
         return result
 
 
@@ -123,39 +133,93 @@ class GoldsetStore:
                 PRIMARY KEY (clip_id, reviewer_id), FOREIGN KEY (clip_id) REFERENCES clips(clip_id)
             );
             CREATE TABLE IF NOT EXISTS claims (
-                clip_id TEXT PRIMARY KEY, reviewer_id TEXT NOT NULL, claimed_at TEXT NOT NULL
+                clip_id TEXT NOT NULL, reviewer_id TEXT NOT NULL, claimed_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL,
+                PRIMARY KEY (clip_id, reviewer_id),
+                FOREIGN KEY (clip_id) REFERENCES clips(clip_id)
+            );
+            CREATE TABLE IF NOT EXISTS adjudications (
+                clip_id TEXT PRIMARY KEY, adjudicator_id TEXT NOT NULL,
+                consensus_labels TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, FOREIGN KEY (clip_id) REFERENCES clips(clip_id)
             );
         """)
+        self._migrate_claims()
         self._db.commit()
+
+    def _migrate_claims(self) -> None:
+        """Upgrade the pre-double-review queue without losing its audit trail."""
+        columns = {str(row["name"]): int(row["pk"]) for row in self._db.execute("PRAGMA table_info(claims)")}
+        if "lease_expires_at" in columns and columns.get("clip_id") != 0:
+            return
+        self._db.execute("ALTER TABLE claims RENAME TO claims_legacy")
+        self._db.execute("""CREATE TABLE claims (
+            clip_id TEXT NOT NULL, reviewer_id TEXT NOT NULL, claimed_at TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL, PRIMARY KEY (clip_id, reviewer_id),
+            FOREIGN KEY (clip_id) REFERENCES clips(clip_id)
+        )""")
+        from datetime import datetime, timezone
+        expired = datetime.now(timezone.utc).isoformat()
+        self._db.execute("INSERT INTO claims(clip_id, reviewer_id, claimed_at, lease_expires_at) SELECT clip_id, reviewer_id, claimed_at, ? FROM claims_legacy", (expired,))
+        self._db.execute("DROP TABLE claims_legacy")
 
     def close(self) -> None:
         self._db.close()
 
     def add_clip(self, clip: ClipRecord) -> None:
-        self._db.execute("INSERT OR REPLACE INTO clips VALUES (?, ?, ?, ?, ?)", (clip.clip_id, canonical_json(clip.to_dict()), clip.split_group, clip.split, clip.audio_sha256))
+        payload = canonical_json(clip.to_dict())
+        try:
+            self._db.execute("INSERT INTO clips VALUES (?, ?, ?, ?, ?)", (clip.clip_id, payload, clip.split_group, clip.split, clip.audio_sha256))
+        except sqlite3.IntegrityError:
+            existing = self._db.execute("SELECT payload FROM clips WHERE clip_id=?", (clip.clip_id,)).fetchone()
+            if existing is None or str(existing["payload"]) != payload:
+                raise ValueError(f"clip_id already exists with different immutable content: {clip.clip_id}")
         self._db.commit()
 
     def add_clips(self, clips: Iterable[ClipRecord]) -> None:
         for clip in clips:
             self.add_clip(clip)
 
-    def claim(self, reviewer_id: str, *, split: str | None = None) -> ClipRecord | None:
-        query = "SELECT c.* FROM clips c LEFT JOIN claims q ON q.clip_id=c.clip_id WHERE q.clip_id IS NULL"
-        args: list[Any] = []
+    def claim(self, reviewer_id: str, *, split: str | None = None, lease_seconds: int = 900) -> ClipRecord | None:
+        from datetime import datetime, timedelta, timezone
+        reviewer_id = _text(reviewer_id)
+        if not reviewer_id or lease_seconds <= 0:
+            raise ValueError("reviewer_id and positive lease_seconds are required")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expires_text = (now + timedelta(seconds=int(lease_seconds))).isoformat()
+        self._db.execute("BEGIN IMMEDIATE")
+        query = """SELECT c.* FROM clips c
+            WHERE NOT EXISTS (SELECT 1 FROM labels l WHERE l.clip_id=c.clip_id AND l.reviewer_id=?)
+              AND NOT EXISTS (SELECT 1 FROM claims q WHERE q.clip_id=c.clip_id AND q.reviewer_id=? AND q.lease_expires_at>?)"""
+        args: list[Any] = [reviewer_id, reviewer_id, now_text]
         if split:
             query += " AND c.split=?"; args.append(split)
         row = self._db.execute(query + " ORDER BY c.clip_id LIMIT 1", args).fetchone()
         if row is None:
+            self._db.commit()
             return None
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        self._db.execute("INSERT OR IGNORE INTO claims VALUES (?, ?, ?)", (row["clip_id"], reviewer_id, now)); self._db.commit()
+        self._db.execute("INSERT OR REPLACE INTO claims VALUES (?, ?, ?, ?)", (row["clip_id"], reviewer_id, now_text, expires_text)); self._db.commit()
         return ClipRecord(**json.loads(row["payload"]))
+
+    def release_claim(self, clip_id: str, reviewer_id: str) -> None:
+        self._db.execute("DELETE FROM claims WHERE clip_id=? AND reviewer_id=?", (clip_id, reviewer_id)); self._db.commit()
 
     def save_label(self, label: HumanLabel) -> None:
         if self._db.execute("SELECT 1 FROM clips WHERE clip_id=?", (label.clip_id,)).fetchone() is None:
             raise ValueError(f"unknown clip: {label.clip_id}")
         self._db.execute("INSERT OR REPLACE INTO labels VALUES (?, ?, ?)", (label.clip_id, label.reviewer_id, canonical_json(label.to_dict())))
+        self._db.execute("DELETE FROM claims WHERE clip_id=? AND reviewer_id=?", (label.clip_id, label.reviewer_id))
+        self._db.commit()
+
+    def adjudicate(self, clip_id: str, adjudicator_id: str, consensus_labels: Sequence[str], *, comment: str = "") -> None:
+        selected = tuple(dict.fromkeys(str(item).strip() for item in consensus_labels if str(item).strip()))
+        if not selected or any(item not in LABELS for item in selected):
+            raise ValueError("adjudication requires valid consensus labels")
+        if self._db.execute("SELECT 1 FROM clips WHERE clip_id=?", (clip_id,)).fetchone() is None:
+            raise ValueError(f"unknown clip: {clip_id}")
+        from datetime import datetime, timezone
+        self._db.execute("INSERT OR REPLACE INTO adjudications VALUES (?, ?, ?, ?, ?)", (clip_id, adjudicator_id, canonical_json(list(selected)), comment, datetime.now(timezone.utc).isoformat()))
         self._db.commit()
 
     def clips(self) -> list[ClipRecord]:
@@ -163,8 +227,10 @@ class GoldsetStore:
 
     def labels(self) -> list[HumanLabel]:
         result = []
+        adjudicated = {row["clip_id"]: row["adjudicator_id"] for row in self._db.execute("SELECT clip_id, adjudicator_id FROM adjudications")}
         for row in self._db.execute("SELECT payload FROM labels ORDER BY clip_id, reviewer_id"):
-            value = json.loads(row["payload"]); value["affected_tokens"] = tuple(value.get("affected_tokens") or [])
+            value = json.loads(row["payload"]); value["affected_tokens"] = tuple(value.get("affected_tokens") or []); value["labels"] = tuple(value.get("labels") or ([value.get("label")] if value.get("label") else []))
+            if value.get("clip_id") in adjudicated: value["adjudicated_by"] = adjudicated[value["clip_id"]]
             result.append(HumanLabel(**value))
         return result
 
@@ -181,8 +247,8 @@ class GoldsetStore:
         for label in labels: by_clip.setdefault(label.clip_id, []).append(label)
         disagreements = []
         for clip_id, rows in by_clip.items():
-            if len({row.label for row in rows}) > 1 and not any(row.adjudicated_by for row in rows):
-                disagreements.append({"clip_id": clip_id, "reviewers": [row.reviewer_id for row in rows], "labels": [row.label for row in rows]})
+            if len({tuple(row.labels) for row in rows}) > 1 and not any(row.adjudicated_by for row in rows):
+                disagreements.append({"clip_id": clip_id, "reviewers": [row.reviewer_id for row in rows], "labels": [list(row.labels) for row in rows]})
         paths["disagreements"].write_text("".join(canonical_json(row) + "\n" for row in disagreements), encoding="utf-8")
         return {key: str(value) for key, value in paths.items()}
 
@@ -206,7 +272,7 @@ def validate_goldset(clips: Iterable[ClipRecord], labels: Iterable[HumanLabel], 
     if require_double_review:
         errors.extend(f"missing independent reviews: {clip_id}" for clip_id in ids if len({row.reviewer_id for row in labels_by_clip.get(clip_id, [])}) < 2)
     for clip_id, rows in labels_by_clip.items():
-        if len({row.label for row in rows}) > 1 and not any(row.adjudicated_by for row in rows): errors.append(f"unadjudicated disagreement: {clip_id}")
+        if len({tuple(row.labels) for row in rows}) > 1 and not any(row.adjudicated_by for row in rows): errors.append(f"unadjudicated disagreement: {clip_id}")
     counts = {split: sum(1 for clip in clips if clip.split == split) for split in SPLITS}
     return {"valid": not errors, "errors": errors, "clip_count": len(clips), "label_count": len(labels), "split_counts": counts, "hidden_test_sealed": counts["hidden_test"] > 0}
 

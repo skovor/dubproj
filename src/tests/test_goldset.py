@@ -21,6 +21,28 @@ class GoldsetTests(unittest.TestCase):
             store.save_label(HumanLabel("c1", "a", "CORRECT_NEUTRAL"))
             result = validate_goldset(store.clips(), store.labels()); self.assertFalse(result["valid"]); self.assertTrue(any("independent" in e for e in result["errors"])); store.close()
 
+    def test_claim_allows_two_reviewers_but_not_duplicate_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite"); store.add_clip(clip())
+            self.assertEqual(store.claim("reviewer-a").clip_id, "c1")
+            self.assertIsNone(store.claim("reviewer-a"))
+            self.assertEqual(store.claim("reviewer-b").clip_id, "c1")
+            store.save_label(HumanLabel("c1", "reviewer-a", labels=("CORRECT_NEUTRAL", "TIMING_BAD")))
+            self.assertIsNone(store.claim("reviewer-a"))
+            store.close()
+
+    def test_clip_content_is_immutable_and_adjudication_is_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite"); store.add_clip(clip())
+            with self.assertRaises(ValueError):
+                store.add_clip(ClipRecord("c1", SHA, "scene", "l1", "other-take", "speaker", "Different"))
+            store.save_label(HumanLabel("c1", "a", "CORRECT_NEUTRAL")); store.save_label(HumanLabel("c1", "b", "LEXICAL_ERROR"))
+            self.assertFalse(validate_goldset(store.clips(), store.labels())["valid"])
+            store.adjudicate("c1", "lead", ("CORRECT_NEUTRAL",), comment="reviewed")
+            result = validate_goldset(store.clips(), store.labels())
+            self.assertTrue(result["valid"])
+            store.close()
+
     def test_disagreement_requires_adjudication(self):
         c = clip(); labels = [HumanLabel("c1", "a", "CORRECT_NEUTRAL"), HumanLabel("c1", "b", "LEXICAL_ERROR")]
         result = validate_goldset([c], labels); self.assertFalse(result["valid"]); self.assertTrue(any("disagreement" in e for e in result["errors"]))
