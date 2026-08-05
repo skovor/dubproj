@@ -10,7 +10,11 @@ class FinalValidationTests(unittest.TestCase):
         manifest=BenchmarkManifest("b",("l1",),("audio",),("ref",),"models","runtime","profile","config","commit","LINE_SEPARATED",False); self.assertEqual(len(manifest.digest()),64)
         result=run_benchmark(manifest,lambda *_:{"status":"PASS"},require_files=False); self.assertEqual(result.passed,1); self.assertGreater(result.lines_per_minute,0)
     def test_second_game_is_explicit(self):
-        result=SecondGameAdapter("other").validate({"scenes":["s"]}); self.assertTrue(result["valid"]); self.assertTrue(result["independent_adapter"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); audio=root/"audio.wav"; reference=root/"reference.wav"; audio.write_bytes(b"audio"); reference.write_bytes(b"reference")
+            import hashlib
+            result=SecondGameAdapter("other").validate({"scenes":[{"scene_id":"s","game_id":"other","audio_path":str(audio),"reference_path":str(reference),"audio_sha256":hashlib.sha256(audio.read_bytes()).hexdigest(),"reference_sha256":hashlib.sha256(reference.read_bytes()).hexdigest(),"timing":{"start":0,"end":1},"extraction_status":"VERIFIED"}]})
+            self.assertTrue(result["valid"]); self.assertTrue(result["independent_adapter"]); self.assertTrue(result["content_verified"])
     def test_manifest_is_content_addressed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
