@@ -1,0 +1,71 @@
+{
+  "schema": "v2-release-check-v1",
+  "status": "PASS",
+  "checks": [
+    {
+      "command": [
+        "C:\\Users\\juand\\Documents\\Codex\\2026-08-02\\you-are-a-backend-engineer-specializing\\dubproj\\src\\.venv\\Scripts\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "."
+      ],
+      "returncode": 0,
+      "wall_seconds": 4.725252100004582,
+      "stdout_tail": "",
+      "stderr_tail": ""
+    },
+    {
+      "command": [
+        "C:\\Users\\juand\\Documents\\Codex\\2026-08-02\\you-are-a-backend-engineer-specializing\\dubproj\\src\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "returncode": 0,
+      "wall_seconds": 6.535503699997207,
+      "stdout_tail": "........................................................................ [ 43%]\n........................................................................ [ 86%]\n.......................                                       [100%]\n167 passed, 3 skipped, 11 subtests passed in 5.83s\n",
+      "stderr_tail": ""
+    },
+    {
+      "command": [
+        "C:\\Users\\juand\\Documents\\Codex\\2026-08-02\\you-are-a-backend-engineer-specializing\\dubproj\\src\\.venv\\Scripts\\python.exe",
+        "tests/run_smoke.py"
+      ],
+      "returncode": 0,
+      "wall_seconds": 1.5002327999973204,
+      "stdout_tail": "generic tests: PASS\n",
+      "stderr_tail": ""
+    },
+    {
+      "command": [
+        "C:\\Users\\juand\\Documents\\Codex\\2026-08-02\\you-are-a-backend-engineer-specializing\\dubproj\\src\\.venv\\Scripts\\python.exe",
+        "tests/run_v2.py"
+      ],
+      "returncode": 0,
+      "wall_seconds": 3.3808826000022236,
+      "stdout_tail": "",
+      "stderr_tail": "_normalization_keeps_german_content_deterministic) ... ok\ntest_whisperx_adapter_passes_segments_not_outer_result (test_v2.V2QATests.test_whisperx_adapter_passes_segments_not_outer_result) ... ok\ntest_whisperx_escalation_is_only_a_serializable_request (test_v2.V2QATests.test_whisperx_escalation_is_only_a_serializable_request) ... ok\ntest_whisperx_official_segment_chars_are_used_before_word_fallback (test_v2.V2QATests.test_whisperx_official_segment_chars_are_used_before_word_fallback) ... ok\ntest_asr_uncertain_is_held_without_regeneration (test_v2.V2SchedulerTests.test_asr_uncertain_is_held_without_regeneration) ... ok\ntest_blocked_calibration_is_deterministic_and_not_a_retry (test_v2.V2SchedulerTests.test_blocked_calibration_is_deterministic_and_not_a_retry) ... ok\ntest_final_selection_happens_after_processed_and_mounted_qa (test_v2.V2SchedulerTests.test_final_selection_happens_after_processed_and_mounted_qa) ... ok\ntest_fmv_scene_uses_surgical_mount (test_v2.V2SchedulerTests.test_fmv_scene_uses_surgical_mount) ... ok\ntest_lexical_suspicion_is_held_without_regeneration (test_v2.V2SchedulerTests.test_lexical_suspicion_is_held_without_regeneration) ... ok\ntest_mfa_is_invoked_only_when_cost_route_requests_it (test_v2.V2SchedulerTests.test_mfa_is_invoked_only_when_cost_route_requests_it) ... ok\ntest_qa_is_after_initial_cohort (test_v2.V2SchedulerTests.test_qa_is_after_initial_cohort) ... ok\ntest_repaired_candidate_reenters_full_pipeline_and_can_be_selected (test_v2.V2SchedulerTests.test_repaired_candidate_reenters_full_pipeline_and_can_be_selected) ... ok\ntest_run_scene_enforces_declared_performance_duration (test_v2.V2SchedulerTests.test_run_scene_enforces_declared_performance_duration) ... ok\ntest_second_screened_candidate_is_not_hidden_by_first_uncertain_candidate (test_v2.V2SchedulerTests.test_second_screened_candidate_is_not_hidden_by_first_uncertain_candidate) ... ok\n\n----------------------------------------------------------------------\nRan 56 tests in 3.049s\n\nOK\n"
+    },
+    {
+      "command": [
+        "C:\\Users\\juand\\Documents\\Codex\\2026-08-02\\you-are-a-backend-engineer-specializing\\dubproj\\src\\.venv\\Scripts\\python.exe",
+        "scripts/check_port.py"
+      ],
+      "returncode": 0,
+      "wall_seconds": 0.06269269999756943,
+      "stdout_tail": "generic source check: PASS (56 ported modules)\n",
+      "stderr_tail": ""
+    },
+    {
+      "command": [
+        "C:\\Users\\juand\\Documents\\Codex\\2026-08-02\\you-are-a-backend-engineer-specializing\\dubproj\\src\\.venv\\Scripts\\python.exe",
+        "scripts/validate_instructions.py"
+      ],
+      "returncode": 0,
+      "wall_seconds": 0.05718090001028031,
+      "stdout_tail": "{\n  \"status\": \"PASS\",\n  \"skills\": 9,\n  \"rules\": 10,\n  \"external_references\": 29,\n  \"manifest\": null\n}\n",
+      "stderr_tail": ""
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "schema": "dubproj-final-verification-v2",
+  "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
+  "validated_code_commit": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
+  "branch": "refactor/p3r-pipeline-v2",
+  "remote_head_verified": true,
+  "remote_head": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
+  "correction_commits": [
+    {"sha": "b349ba8e3b3d1f8fa9a0246d649017294cb69298", "title": "Bind the complete calibration profile to strict promotion receipts"},
+    {"sha": "a6f82a5bbaadf35ea2eb5d794d6b55c189254de4", "title": "Fix LID train serving parity and forbid raw CTC authority"},
+    {"sha": "ae1350561e3f317e80cd05447ac8b6dd017962cd", "title": "Make hidden review and evaluation truly isolated and one shot"},
+    {"sha": "e6dd696280c89c6beb21815f0445939738106cbb", "title": "Reinsert repaired candidates through the complete QA pipeline"},
+    {"sha": "a3d4066ebfd89326f8ce29ddecd26bb69200bfcf", "title": "Execute candidate performance policies with a categorical schema"},
+    {"sha": "a8ac451b6aeb2accb74238b642e5049b0531859c", "title": "Audit the configured dialogue channel and mounted speech delta"},
+    {"sha": "ab54ac616a43700629937d898932740f052b032c", "title": "Replace monotonic FMV cursors with bounded visited-state search"},
+    {"sha": "d33f182528022432821fbd3dee709a1e03cad409", "title": "Make benchmark and second-game promotion recompute trusted evidence"},
+    {"sha": "3e7d5f48ddd38b8488cf00ba25afb35d9cf84778", "title": "Disable legacy hard pass and isolate optional historical tests"},
+    {"sha": "ad1eddb2f64cb4f4add2514de0d839d314f436c3", "title": "Add genuine cross module adversarial integration coverage"}
+  ],
+  "findings": [
+    {"id": "P0.1", "status": "VERIFIED", "evidence": ["calibration/receipt.py", "calibration_profile_status()", "tests/test_calibration_promotion.py", "b349ba8"]},
+    {"id": "P0.2", "status": "VERIFIED", "evidence": ["qa_v2.py calibrated LID vector", "lid-fusion-v3", "tests/test_lid.py", "a6f82a5"]},
+    {"id": "P0.3", "status": "VERIFIED", "evidence": ["GoldsetStore.claim allow_hidden=False", "serve_goldset_review.py token-separated endpoints", "ae13505"]},
+    {"id": "P0.4", "status": "VERIFIED", "evidence": ["hidden seal verification and atomic one-shot receipt", "promote_calibration_profile.py receipt input", "ae13505"]},
+    {"id": "P0.5", "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED", "evidence": ["benchmark.py artifact re-open/hash/decode checks", "promote_branch.py executes allowlisted adapter", "tests/test_cross_module_integration.py", "d33f182"], "limit": "No P3R/DQ3 real benchmark or CI attestation was available in this workspace."},
+    {"id": "P1.1", "status": "VERIFIED", "evidence": ["RepairedCandidate and full stage reinsertion", "tests/test_v2.py::test_repaired_candidate_reenters_full_pipeline_and_can_be_selected", "e6dd696"]},
+    {"id": "P1.2", "status": "VERIFIED", "evidence": ["measured performance evidence and categorical one-hot schema", "run_scene_v2 duration gate test", "a3d4066"]},
+    {"id": "P1.3", "status": "VERIFIED", "evidence": ["scene.dialogue_channel and mounted-source delta", "tests/test_scene_qa_windows.py", "a8ac451"]},
+    {"id": "P1.4", "status": "VERIFIED", "evidence": ["bounded visited-state FMV search", "A1+B1/A1+B2/A2+B1 regression", "ab54ac6"]},
+    {"id": "P1.5", "status": "VERIFIED", "evidence": ["strict structured-linguistic-evidence policy", "legacy transcript becomes HUMAN_REVIEW/ASR_UNCERTAIN", "3e7d5f4"]},
+    {"id": "P1.6", "status": "VERIFIED", "evidence": ["root pytest discovery includes explicit historical skips", "167 passed, 3 skipped, 11 subtests", "3e7d5f4"]},
+    {"id": "P2.1", "status": "REMAINING_LIMIT", "evidence": ["sequence alignment remains deterministic and covered"], "limit": "No separate tie-break policy redesign was requested by the corrective commits."},
+    {"id": "P2.2", "status": "REMAINING_LIMIT", "evidence": ["German/apostrophe normalization and feature contracts are covered"], "limit": "An apostrophe is still an orthographic unit; no game-specific acoustic phoneme map exists."},
+    {"id": "P2.3", "status": "VERIFIED", "evidence": ["NFC German normalization and cross-module integration regression", "f1407ee ancestry and ad1eddb"]}
+  ],
+  "tests": {
+    "pytest_root_discovery": {"command": "cd src; .venv\\Scripts\\python.exe -m pytest -q", "result": "167 passed, 3 skipped, 11 subtests passed", "exit_code": 0},
+    "unittest_discovery": {"command": "cd src; .venv\\Scripts\\python.exe -m unittest discover -s tests -p test*.py", "result": "145 tests OK", "exit_code": 0},
+    "compileall": {"command": "cd src; .venv\\Scripts\\python.exe -m compileall -q .", "result": "no output", "exit_code": 0},
+    "release_check": {"path": "artifacts/final_verification/release_check.json", "status": "PASS", "exit_code": 0, "scope": ["compileall", "pytest -q", "tests/run_smoke.py", "tests/run_v2.py", "scripts/check_port.py", "scripts/validate_instructions.py"]},
+    "pip_check": {"command": "cd src; .venv\\Scripts\\python.exe -m pip check", "result": "No broken requirements found", "exit_code": 0},
+    "git_diff_check": {"command": "git diff --check", "exit_code": 0},
+    "commit_level": {"commit_5": "84 affected tests", "commit_6": "66 affected tests", "commit_7": "71 affected tests", "commit_8": "78 affected tests", "commit_9": "164 passed, 3 skipped, 11 subtests", "commit_10": "3 integration tests"}
+  },
+  "real_validation": {
+    "p3r": "BLOCKED: no verified Persona 3 Reload audio/assets were available in this workspace",
+    "dq3_hd2d": "BLOCKED: no verified Dragon Quest III HD-2D audio/assets were available in this workspace",
+    "omnivoice_gpu": "NOT_RUN",
+    "whisperx_speechbrain_mfa_ci": "NOT_RUN",
+    "gold_set_human": "PENDING",
+    "calibration_authority": false,
+    "ci_independent_for_validated_code_commit": "NOT_OBSERVED"
+  },
+  "limitations": [
+    "No real P3R or DQ3 audio benchmark was executed; synthetic integration tests are explicitly not game validation.",
+    "No human two-reviewer gold set was supplied; calibration authority remains false.",
+    "Optional ML backends and OmniVoice GPU were not run in this environment.",
+    "P2.1 and P2.2 remain documented non-blocking limits.",
+    "The release check's PASS is CPU/core/repository evidence only, not acoustic quality evidence."
+  ],
+  "generated_files": ["artifacts/final_verification/report.json", "artifacts/final_verification/report.md", "artifacts/final_verification/release_check.json"]
+}
