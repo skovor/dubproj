@@ -1,4 +1,9 @@
 .venv/
+models/
+tools/ffmpeg/
+tools/*.zip
+config/project.local.json
+config/local-runtime/
 build/
 *.egg-info/
 __pycache__/
