@@ -43,7 +43,28 @@ def _require_class_composition(rows: list[Any], split: str, *, minimum: int = 2)
         raise PromotionError(f"{split} requires at least {minimum} positive and {minimum} negative sealed rows")
 
 
-def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | Mapping[str, Any], final_anchor_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, lid_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, validation: ValidationReport, hidden: ValidationReport, dataset_files: Mapping[str, str | Path], identity: Mapping[str, Any], thresholds: Mapping[str, float], provenance: Mapping[str, Any], output: str | Path, validation_rows: Iterable[Any] | None = None, hidden_rows: Iterable[Any] | None = None, minimum_class_count: int = 2) -> dict[str, Any]:
+def _validate_report(report: ValidationReport, *, role: str, split: str) -> None:
+    """Reject claims that cannot be a metric report for this role/split."""
+    if report.split != split:
+        raise PromotionError(f"{role} report is mislabelled as {report.split!r}")
+    if report.count < 0 or report.false_pass_count < 0 or report.false_fail_count < 0:
+        raise PromotionError(f"{role} report contains negative counts")
+    if report.count != len(report.predictions):
+        raise PromotionError(f"{role} report count does not match predictions")
+    for value in (report.brier_score, report.expected_calibration_error):
+        if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
+            raise PromotionError(f"{role} report metric is outside [0,1]")
+    for prediction in report.predictions:
+        try:
+            probability = float(prediction["probability"])
+            label = int(prediction["label"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PromotionError(f"{role} report has malformed prediction") from exc
+        if label not in (0, 1) or not 0.0 <= probability <= 1.0:
+            raise PromotionError(f"{role} report has an invalid prediction")
+
+
+def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | Mapping[str, Any], final_anchor_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, lid_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, validation: ValidationReport, hidden: ValidationReport, dataset_files: Mapping[str, str | Path], identity: Mapping[str, Any], thresholds: Mapping[str, float], provenance: Mapping[str, Any], output: str | Path, validation_rows: Iterable[Any] | None = None, hidden_rows: Iterable[Any] | None = None, role_validation_rows: Mapping[str, Iterable[Any]] | None = None, role_hidden_rows: Mapping[str, Iterable[Any]] | None = None, role_validation_reports: Mapping[str, ValidationReport] | None = None, role_hidden_reports: Mapping[str, ValidationReport] | None = None, minimum_class_count: int = 2) -> dict[str, Any]:
     """Create VALIDATED only from sealed rows and recomputed predictions.
 
     Precomputed JSON reports are treated as claims, not evidence.  Callers
@@ -51,18 +72,52 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
     recompute every probability and compare the supplied reports to that
     recomputation before promotion.
     """
-    if validation.split != "validation" or hidden.split != "hidden_test": raise PromotionError("validation/hidden reports are mislabelled")
+    _validate_report(validation, role="target", split="validation")
+    _validate_report(hidden, role="target", split="hidden_test")
     if validation_rows is None or hidden_rows is None:
         raise PromotionError("sealed validation_rows and hidden_rows are required; reports alone are not evidence")
-    validation_rows = list(validation_rows); hidden_rows = list(hidden_rows)
-    _require_class_composition(validation_rows, "validation", minimum=minimum_class_count)
-    _require_class_composition(hidden_rows, "hidden_test", minimum=minimum_class_count)
-    target_validation = evaluate(target_artifact, validation_rows, split="validation", pass_probability=float(thresholds.get("target_pass_probability", .8)), fail_probability=float(thresholds.get("target_failure_probability", .2)), run_id=validation.run_id)
-    target_hidden = evaluate(target_artifact, hidden_rows, split="hidden_test", pass_probability=float(thresholds.get("target_pass_probability", .8)), fail_probability=float(thresholds.get("target_failure_probability", .2)), run_id=hidden.run_id)
-    if target_validation.to_dict() != validation.to_dict() or target_hidden.to_dict() != hidden.to_dict():
-        raise PromotionError("supplied validation/hidden report differs from recomputed predictions")
-    if target_hidden.false_pass_count > 0: raise PromotionError("hidden false PASS blocks promotion")
-    if not hidden.run_id.strip(): raise PromotionError("hidden test must have a one-shot run_id")
+    # The legacy arguments remain aliases for target evidence only.  Anchor and
+    # LID rows must be supplied independently; reusing target rows would make
+    # an apparently calibrated profile impossible to audit.
+    role_validation_rows = dict(role_validation_rows or {})
+    role_hidden_rows = dict(role_hidden_rows or {})
+    role_validation_rows.setdefault("target", validation_rows)
+    role_hidden_rows.setdefault("target", hidden_rows)
+    if not {"target", "final_anchor", "lid"}.issubset(role_validation_rows) or not {"target", "final_anchor", "lid"}.issubset(role_hidden_rows):
+        raise PromotionError("independent validation and hidden rows are required for target, final_anchor, and lid")
+    role_validation_rows = {role: list(rows) for role, rows in role_validation_rows.items()}
+    role_hidden_rows = {role: list(rows) for role, rows in role_hidden_rows.items()}
+    role_validation_reports = dict(role_validation_reports or {})
+    role_hidden_reports = dict(role_hidden_reports or {})
+    role_validation_reports.setdefault("target", validation)
+    role_hidden_reports.setdefault("target", hidden)
+    artifacts_by_role = {"target": target_artifact, "final_anchor": final_anchor_artifact, "lid": lid_artifact}
+    pass_keys = {"target": "target_pass_probability", "final_anchor": "final_anchor_pass_probability", "lid": "source_lid_probability"}
+    reports: dict[str, dict[str, dict[str, Any]]] = {}
+    for role, artifact_value in artifacts_by_role.items():
+        if artifact_value is None:
+            raise PromotionError(f"{role} artifact is required")
+        if role not in role_validation_reports or role not in role_hidden_reports:
+            raise PromotionError(f"independent {role} validation and hidden reports are required")
+        supplied_validation = role_validation_reports[role]
+        supplied_hidden = role_hidden_reports[role]
+        _validate_report(supplied_validation, role=role, split="validation")
+        _validate_report(supplied_hidden, role=role, split="hidden_test")
+        validation_role_rows = role_validation_rows[role]
+        hidden_role_rows = role_hidden_rows[role]
+        _require_class_composition(validation_role_rows, "validation", minimum=minimum_class_count)
+        _require_class_composition(hidden_role_rows, "hidden_test", minimum=minimum_class_count)
+        pass_probability = float(thresholds.get(pass_keys[role], .8))
+        fail_probability = float(thresholds.get("target_failure_probability", .2))
+        recomputed_validation = evaluate(artifact_value, validation_role_rows, split="validation", pass_probability=pass_probability, fail_probability=fail_probability, run_id=supplied_validation.run_id)
+        recomputed_hidden = evaluate(artifact_value, hidden_role_rows, split="hidden_test", pass_probability=pass_probability, fail_probability=fail_probability, run_id=supplied_hidden.run_id)
+        if recomputed_validation.to_dict() != supplied_validation.to_dict() or recomputed_hidden.to_dict() != supplied_hidden.to_dict():
+            raise PromotionError(f"supplied {role} report differs from recomputed predictions")
+        if recomputed_hidden.false_pass_count > 0:
+            raise PromotionError(f"{role} hidden false PASS blocks promotion")
+        if not supplied_hidden.run_id.strip():
+            raise PromotionError(f"{role} hidden test must have a one-shot run_id")
+        reports[role] = {"validation": supplied_validation.to_dict(), "hidden_test": supplied_hidden.to_dict()}
     if not profile_id.strip() or not all(str(identity.get(key, "")).strip() for key in ("backend_id", "model_id", "model_revision", "feature_schema_version", "target_language", "source_language")): raise PromotionError("incomplete identity")
     expected = {"target_pass_probability", "target_failure_probability", "final_anchor_pass_probability", "source_lid_probability"}
     if set(thresholds) < expected or not (0 <= float(thresholds["target_failure_probability"]) < float(thresholds["target_pass_probability"]) <= 1): raise PromotionError("invalid thresholds")
@@ -74,7 +129,6 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
     if not all(str(provenance.get(key, "")).strip() for key in ("code_commit", "runtime_lock_sha256", "models_lock_sha256")): raise PromotionError("incomplete provenance")
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(provenance.get("code_commit", ""))): raise PromotionError("code_commit must be a real Git SHA")
     if any(not re.fullmatch(r"[0-9a-fA-F]{64}", str(provenance.get(key, ""))) for key in ("runtime_lock_sha256", "models_lock_sha256")): raise PromotionError("lock provenance hashes are invalid")
-    if final_anchor_artifact is None or lid_artifact is None: raise PromotionError("target, final-anchor, and LID artifacts are all required")
     artifact = target_artifact.to_dict() if isinstance(target_artifact, CalibrationArtifact) else dict(target_artifact)
     anchor = final_anchor_artifact.to_dict() if isinstance(final_anchor_artifact, CalibrationArtifact) else dict(final_anchor_artifact)
     lid = lid_artifact.to_dict() if isinstance(lid_artifact, CalibrationArtifact) else dict(lid_artifact)
@@ -84,7 +138,7 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
         "identity": dict(identity), "thresholds": {key: float(value) for key, value in thresholds.items()},
         "calibrators": {"target": target_spec, "final_anchor": anchor_spec, "lid": lid_spec},
         "dataset": {**hashes, "calibration_count": int(artifact.get("sample_count", 0)), "validation_count": validation.count, "hidden_test_count": hidden.count},
-        "metrics": {"hidden_false_pass_count": hidden.false_pass_count, "hidden_false_fail_count": hidden.false_fail_count, "brier_score": hidden.brier_score, "expected_calibration_error": hidden.expected_calibration_error, "validation": validation.to_dict(), "validation_predictions_sha256": _prediction_digest(validation), "hidden_predictions_sha256": _prediction_digest(hidden), "recomputed": True},
+        "metrics": {"hidden_false_pass_count": hidden.false_pass_count, "hidden_false_fail_count": hidden.false_fail_count, "brier_score": hidden.brier_score, "expected_calibration_error": hidden.expected_calibration_error, "validation": validation.to_dict(), "validation_predictions_sha256": _prediction_digest(validation), "hidden_predictions_sha256": _prediction_digest(hidden), "reports": reports, "recomputed": True},
         "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id},
     }
     destination = Path(output); destination.parent.mkdir(parents=True, exist_ok=True); destination.write_text(json.dumps(profile, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); return profile

@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dubbing_pipeline.calibration import FeatureRow, load_draft
+from dubbing_pipeline.calibration import FeatureRow, LIDFeatureRow, load_draft
 from dubbing_pipeline.calibration.promote import promote_profile
 from dubbing_pipeline.calibration.validate import ValidationReport, evaluate
 
@@ -24,12 +24,13 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _rows(path: Path) -> list[FeatureRow]:
+def _rows(path: Path, *, lid: bool = False) -> list[FeatureRow | LIDFeatureRow]:
     result = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             value = json.loads(line)
-            result.append(FeatureRow(str(value["clip_id"]), str(value["split"]), str(value["split_group"]), int(value["label"]), dict(value["features"]), str(value.get("performance_mode", "NEUTRAL")), value.get("metadata")))
+            klass = LIDFeatureRow if lid else FeatureRow
+            result.append(klass(str(value["clip_id"]), str(value["split"]), str(value["split_group"]), int(value["label"]), dict(value["features"]), str(value.get("performance_mode", "NEUTRAL")), value.get("metadata")))
     return result
 
 
@@ -53,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--final-artifact", required=True)
     parser.add_argument("--lid-artifact", required=True)
     parser.add_argument("--features", required=True, help="sealed FeatureRow JSONL; validation and hidden rows are recomputed")
+    parser.add_argument("--final-features", required=True, help="independent final-anchor FeatureRow JSONL")
+    parser.add_argument("--lid-features", required=True, help="independent LIDFeatureRow JSONL")
+    parser.add_argument("--final-validation-report", required=True)
+    parser.add_argument("--final-hidden-report", required=True)
+    parser.add_argument("--lid-validation-report", required=True)
+    parser.add_argument("--lid-hidden-report", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--labels", required=True)
     parser.add_argument("--splits", required=True)
@@ -62,8 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     target_path, final_path, lid_path = Path(args.target_artifact), Path(args.final_artifact), Path(args.lid_artifact)
     target = load_draft(target_path); final = load_draft(final_path); lid = load_draft(lid_path)
-    feature_rows = _rows(Path(args.features)); validation_rows = [row for row in feature_rows if row.split == "validation"]; hidden_rows = [row for row in feature_rows if row.split == "hidden_test"]
-    validation = _report(Path(args.validation_report)); hidden = _report(Path(args.hidden_report))
+    feature_rows = _rows(Path(args.features)); anchor_rows = _rows(Path(args.final_features)); lid_rows = _rows(Path(args.lid_features), lid=True)
+    validation_rows = [row for row in feature_rows if row.split == "validation"]; hidden_rows = [row for row in feature_rows if row.split == "hidden_test"]
+    anchor_validation_rows = [row for row in anchor_rows if row.split == "validation"]; anchor_hidden_rows = [row for row in anchor_rows if row.split == "hidden_test"]
+    lid_validation_rows = [row for row in lid_rows if row.split == "validation"]; lid_hidden_rows = [row for row in lid_rows if row.split == "hidden_test"]
+    validation = _report(Path(args.validation_report)); hidden = _report(Path(args.hidden_report)); anchor_validation = _report(Path(args.final_validation_report)); anchor_hidden = _report(Path(args.final_hidden_report)); lid_validation = _report(Path(args.lid_validation_report)); lid_hidden = _report(Path(args.lid_hidden_report))
     models_path, runtime_path = Path(args.models_lock), Path(args.runtime_lock)
     models = json.loads(models_path.read_text(encoding="utf-8")); model = (models.get("models") or [None])[0]
     if not isinstance(model, dict):
@@ -72,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     identity = {"backend_id": backend_id, "model_id": str(model.get("model_id", "")), "model_revision": str(model.get("revision", "")), "feature_schema_version": str(target.get("feature_schema_version", "")), "target_language": str(model.get("language", "de")), "source_language": "en", "performance_modes": sorted({row.performance_mode for row in feature_rows})}
     thresholds = {"target_pass_probability": .8, "target_failure_probability": .2, "final_anchor_pass_probability": .8, "source_lid_probability": .8}
     provenance = {"code_commit": _git_sha(), "runtime_lock_sha256": _sha(runtime_path), "models_lock_sha256": _sha(models_path)}
-    profile = promote_profile(profile_id=f"{identity['model_id']}-{uuid.uuid4().hex[:8]}", target_artifact={**target, "artifact_path": str(target_path), "artifact_sha256": _sha(target_path)}, final_anchor_artifact={**final, "artifact_path": str(final_path), "artifact_sha256": _sha(final_path)}, lid_artifact={**lid, "artifact_path": str(lid_path), "artifact_sha256": _sha(lid_path)}, validation=validation, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, dataset_files={"manifest_sha256": args.manifest, "labels_sha256": args.labels, "split_manifest_sha256": args.splits}, identity=identity, thresholds=thresholds, provenance=provenance, output=args.output)
+    profile = promote_profile(profile_id=f"{identity['model_id']}-{uuid.uuid4().hex[:8]}", target_artifact={**target, "artifact_path": str(target_path), "artifact_sha256": _sha(target_path)}, final_anchor_artifact={**final, "artifact_path": str(final_path), "artifact_sha256": _sha(final_path)}, lid_artifact={**lid, "artifact_path": str(lid_path), "artifact_sha256": _sha(lid_path)}, validation=validation, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, role_validation_rows={"target": validation_rows, "final_anchor": anchor_validation_rows, "lid": lid_validation_rows}, role_hidden_rows={"target": hidden_rows, "final_anchor": anchor_hidden_rows, "lid": lid_hidden_rows}, role_validation_reports={"target": validation, "final_anchor": anchor_validation, "lid": lid_validation}, role_hidden_reports={"target": hidden, "final_anchor": anchor_hidden, "lid": lid_hidden}, dataset_files={"manifest_sha256": args.manifest, "labels_sha256": args.labels, "split_manifest_sha256": args.splits}, identity=identity, thresholds=thresholds, provenance=provenance, output=args.output)
     print(json.dumps(profile, ensure_ascii=False, indent=2))
     return 0
 

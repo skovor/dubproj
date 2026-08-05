@@ -2,11 +2,13 @@ from __future__ import annotations
 import hashlib, json, tempfile, unittest
 from pathlib import Path
 from dubbing_pipeline.calibration import TARGET_FEATURES, FeatureRow, train_calibrator
-from dubbing_pipeline.calibration.lid_features import LID_FEATURES
+from dubbing_pipeline.calibration.lid_features import LID_FEATURES, LIDFeatureRow
 from dubbing_pipeline.calibration.promote import PromotionError, promote_profile
 from dubbing_pipeline.calibration.validate import ValidationReport, evaluate
 
 def row(i, label, split): return FeatureRow(f"c{i}", split, f"g{i}", label, {name: (3.0 if label else -3.0) for name in TARGET_FEATURES})
+def anchor_row(i, label, split): return FeatureRow(f"a{i}", split, f"ag{i}", label, {"final_coverage": (3.0 if label else -3.0)})
+def lid_row(i, label, split): return LIDFeatureRow(f"l{i}", split, f"lg{i}", label, {name: (3.0 if label else -3.0) for name in LID_FEATURES})
 
 class PromotionTests(unittest.TestCase):
     def test_hidden_false_pass_blocks(self):
@@ -26,7 +28,16 @@ class PromotionTests(unittest.TestCase):
             hidden_rows = [row(4, 1, "hidden_test"), row(8, 0, "hidden_test"), row(9, 1, "hidden_test"), row(10, 0, "hidden_test")]
             valid = evaluate(artifact, validation_rows, split="validation")
             hidden = evaluate(artifact, hidden_rows, split="hidden_test", run_id="h1")
-            profile = promote_profile(profile_id="x", target_artifact={**artifact.to_dict(), "artifact_path": str(artifact_file), "artifact_sha256": sha}, final_anchor_artifact={**final_payload, "artifact_path": str(final_file), "artifact_sha256": final_sha}, lid_artifact={**lid_payload, "artifact_path": str(lid_file), "artifact_sha256": lid_sha}, validation=valid, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, dataset_files=files, identity={"backend_id":"b","model_id":"m","model_revision":"r","feature_schema_version":"char-alignment-v2","target_language":"de","source_language":"en","performance_modes":["NEUTRAL"]}, thresholds={"target_pass_probability":.8,"target_failure_probability":.2,"final_anchor_pass_probability":.8,"source_lid_probability":.8}, provenance={"code_commit":"a"*40,"runtime_lock_sha256":"1"*64,"models_lock_sha256":"2"*64}, output=root/"profile.json")
+            anchor_validation = [anchor_row(1, 1, "validation"), anchor_row(2, 0, "validation"), anchor_row(3, 1, "validation"), anchor_row(4, 0, "validation")]
+            anchor_hidden = [anchor_row(5, 1, "hidden_test"), anchor_row(6, 0, "hidden_test"), anchor_row(7, 1, "hidden_test"), anchor_row(8, 0, "hidden_test")]
+            lid_validation = [lid_row(1, 1, "validation"), lid_row(2, 0, "validation"), lid_row(3, 1, "validation"), lid_row(4, 0, "validation")]
+            lid_hidden = [lid_row(5, 1, "hidden_test"), lid_row(6, 0, "hidden_test"), lid_row(7, 1, "hidden_test"), lid_row(8, 0, "hidden_test")]
+            anchor_valid = evaluate(final_payload, anchor_validation, split="validation")
+            anchor_hidden_report = evaluate(final_payload, anchor_hidden, split="hidden_test", run_id="ah1")
+            lid_valid = evaluate(lid_payload, lid_validation, split="validation")
+            lid_hidden_report = evaluate(lid_payload, lid_hidden, split="hidden_test", run_id="lh1")
+            profile = promote_profile(profile_id="x", target_artifact={**artifact.to_dict(), "artifact_path": str(artifact_file), "artifact_sha256": sha}, final_anchor_artifact={**final_payload, "artifact_path": str(final_file), "artifact_sha256": final_sha}, lid_artifact={**lid_payload, "artifact_path": str(lid_file), "artifact_sha256": lid_sha}, validation=valid, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, role_validation_rows={"target": validation_rows, "final_anchor": anchor_validation, "lid": lid_validation}, role_hidden_rows={"target": hidden_rows, "final_anchor": anchor_hidden, "lid": lid_hidden}, role_validation_reports={"target": valid, "final_anchor": anchor_valid, "lid": lid_valid}, role_hidden_reports={"target": hidden, "final_anchor": anchor_hidden_report, "lid": lid_hidden_report}, dataset_files=files, identity={"backend_id":"b","model_id":"m","model_revision":"r","feature_schema_version":"char-alignment-v2","target_language":"de","source_language":"en","performance_modes":["NEUTRAL"]}, thresholds={"target_pass_probability":.8,"target_failure_probability":.2,"final_anchor_pass_probability":.8,"source_lid_probability":.8}, provenance={"code_commit":"a"*40,"runtime_lock_sha256":"1"*64,"models_lock_sha256":"2"*64}, output=root/"profile.json")
             self.assertEqual(profile["status"], "VALIDATED"); self.assertEqual(profile["dataset"]["manifest_sha256"], hashlib.sha256(b"manifest_sha256").hexdigest())
+            self.assertEqual(set(profile["metrics"]["reports"]), {"target", "final_anchor", "lid"})
 
 if __name__ == "__main__": unittest.main()
