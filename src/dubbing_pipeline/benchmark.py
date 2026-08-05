@@ -24,7 +24,7 @@ def build_invocation_receipt(report: Mapping[str, Any], *, code_commit: str) -> 
             outputs[str(row.get("id") or row.get("line_id"))] = sha256_file(Path(str(row["output"])))
     if base.get("mounted_output") and Path(str(base["mounted_output"])).is_file():
         outputs["__scene__"] = sha256_file(Path(str(base["mounted_output"])))
-    payload = {"schema": "scene-invocation-receipt-v1", "scene_id": str(base.get("scene_id") or ""), "run_id": str(base.get("run_id") or contract_hash("scene-run", {"scene": base.get("scene_id"), "contract": base.get("contract_hash")})), "code_commit": str(code_commit).lower(), "report_sha256": sha256_bytes(canonical_json(base)), "outputs_sha256": outputs}
+    payload = {"schema": "scene-invocation-receipt-v1", "scene_id": str(base.get("scene_id") or base.get("scene") or ""), "run_id": str(base.get("run_id") or contract_hash("scene-run", {"scene": base.get("scene_id") or base.get("scene"), "contract": base.get("contract_hash")})), "code_commit": str(code_commit).lower(), "report_sha256": sha256_bytes(canonical_json(base)), "outputs_sha256": outputs}
     payload["receipt_sha256"] = sha256_bytes(canonical_json(payload))
     return payload
 

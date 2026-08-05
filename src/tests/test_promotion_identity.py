@@ -20,6 +20,10 @@ class PromotionIdentityTests(unittest.TestCase):
         with self.assertRaises(CalibrationConfigurationError) as raised:
             run_scene_v2(None, config, runtime=None)
         self.assertEqual(raised.exception.status, "BLOCKED_CODE_COMMIT_MISMATCH")
+        config.qa.expected_calibration_code_commit = "a" * 40
+        with self.assertRaises(CalibrationConfigurationError) as raised:
+            run_scene_v2(None, config, runtime=None)
+        self.assertEqual(raised.exception.status, "BLOCKED_CODE_COMMIT_MISMATCH")
 
     def test_alignment_identity_requires_one_explicit_role_and_lock_parity(self):
         with tempfile.TemporaryDirectory() as tmp:

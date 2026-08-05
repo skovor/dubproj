@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,14 @@ def validate_production_calibration_identity(config: Any) -> None:
         raise CalibrationConfigurationError("BLOCKED_EXPECTED_CODE_COMMIT_REQUIRED", "production calibration requires qa.expected_calibration_code_commit before generation")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", expected):
         raise CalibrationConfigurationError("BLOCKED_CODE_COMMIT_MISMATCH", "qa.expected_calibration_code_commit must be a full 40-character Git SHA")
+    actual = str(getattr(config, "extra", {}).get("code_commit") or os.environ.get("DUBPROJ_CODE_COMMIT", "")).strip()
+    if not actual:
+        try:
+            actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            actual = ""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", actual) or actual.lower() != expected.lower():
+        raise CalibrationConfigurationError("BLOCKED_CODE_COMMIT_MISMATCH", "qa.expected_calibration_code_commit does not match the running checkout")
 
 
 def _path(value: str | Path | None, base: Path) -> Path | None:
