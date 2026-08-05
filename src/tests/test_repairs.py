@@ -14,5 +14,17 @@ class RepairTests(unittest.TestCase):
             store=AttemptStore(Path(tmp)/"a.sqlite"); action=plan_repairs(FailureCause.SEAM_FAIL)[0]; first=apply_repair(action,line_id="l",input_audio_sha256="a"*64,reference_sha256=None,store=store,executor=lambda _: {"status":"PASS"}); second=apply_repair(action,line_id="l",input_audio_sha256="a"*64,reference_sha256=None,store=store,executor=lambda _: {"status":"PASS"}); self.assertEqual(first.status,"PASS"); self.assertEqual(second.status,"DUPLICATE_ATTEMPT"); store.close()
     def test_causal_actions_are_bounded(self):
         self.assertEqual(plan_repairs(FailureCause.LANGUAGE_LEAK_CONFIRMED)[0].max_attempts,2); self.assertEqual(plan_repairs(FailureCause.DETERMINISTIC_CALIBRATION)[0].max_attempts,0)
+    def test_missing_executor_is_blocked_and_causal_budget_is_enforced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store=AttemptStore(Path(tmp)/"a.sqlite")
+            action=plan_repairs(FailureCause.LANGUAGE_LEAK_CONFIRMED)[0]
+            first=apply_repair(action,line_id="l",input_audio_sha256="a"*64,reference_sha256=None,store=store,executor=None)
+            self.assertEqual(first.status,"BLOCKED_NO_EXECUTOR")
+            varied=action.__class__(action.strategy,action.cause,{**action.parameters,"variant":1},action.allows_tts,action.max_attempts,action.rationale)
+            second=apply_repair(varied,line_id="l",input_audio_sha256="a"*64,reference_sha256=None,store=store,executor=lambda _: {"status":"PASS"})
+            self.assertEqual(second.status,"PASS")
+            exhausted=action.__class__(action.strategy,action.cause,{**action.parameters,"variant":2},action.allows_tts,action.max_attempts,action.rationale)
+            self.assertEqual(apply_repair(exhausted,line_id="l",input_audio_sha256="a"*64,reference_sha256=None,store=store,executor=lambda _: {"status":"PASS"}).status,"BUDGET_EXHAUSTED")
+            store.close()
 
 if __name__=="__main__": unittest.main()

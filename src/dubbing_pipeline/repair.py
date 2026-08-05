@@ -29,6 +29,16 @@ def apply_repair(action: RepairAction, *, line_id: str, input_audio_sha256: str,
     signature=AttemptSignature(line_id,input_audio_sha256,action.strategy,action.parameters,reference_sha256)
     if store.seen(signature): return RepairOutcome("DUPLICATE_ATTEMPT",action,signature.digest(),diagnostics={"reason":"same causal attempt already recorded"})
     if action.cause in {FailureCause.ASR_UNCERTAIN, FailureCause.DETERMINISTIC_CALIBRATION}: return RepairOutcome("HOLD_NO_TTS",action,signature.digest(),diagnostics={"reason":"requires evidence/configuration, not regeneration"})
-    result=dict(executor(action) if executor else {"status":"PLANNED"}); store.record(signature,result,result.get("status","PLANNED")); return RepairOutcome(result.get("status","PLANNED"),action,signature.digest(),result.get("output_audio_sha256"),result)
+    used = store.count_causal(signature)
+    if used >= max(0, int(action.max_attempts)):
+        return RepairOutcome("BUDGET_EXHAUSTED", action, signature.digest(), diagnostics={"attempts": used, "max_attempts": action.max_attempts})
+    if executor is None:
+        result = {"status": "BLOCKED_NO_EXECUTOR", "reason": "causal repair requires a concrete audio executor"}
+    else:
+        result = dict(executor(action))
+        result.setdefault("status", "EXECUTOR_NO_STATUS")
+    status = str(result["status"])
+    store.record(signature,result,status)
+    return RepairOutcome(status,action,signature.digest(),result.get("output_audio_sha256"),{**result,"attempts":used + 1,"max_attempts":action.max_attempts})
 
 __all__=["FailureCause","RepairAction","RepairOutcome","apply_repair"]
