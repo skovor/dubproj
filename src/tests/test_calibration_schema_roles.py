@@ -16,10 +16,10 @@ class CalibrationSchemaRoleTests(unittest.TestCase):
         def artifact(schema: str, name: str) -> dict:
             path = root / name
             features = list(_FINAL_ANCHOR_FEATURES if schema == "final-anchor-v1" else (_LID_FEATURES if schema == "lid-fusion-v1" else _CALIBRATOR_FEATURES))
-            path.write_text(json.dumps({"schema": "platt-calibrator-v1", "feature_schema_version": schema, "normalization_version": "alignment-text-normalization-v1", "features": features, "coefficients": [1.0] * len(features), "intercept": 0.0, "normalization": [{"mean": 0.0, "scale": 1.0} for _ in features]}), encoding="utf-8")
+            path.write_text(json.dumps({"schema": "platt-calibrator-v1", "feature_schema_version": schema, "normalization_version": "alignment-text-normalization-v2", "features": features, "coefficients": [1.0] * len(features), "intercept": 0.0, "normalization": [{"mean": 0.0, "scale": 1.0} for _ in features]}), encoding="utf-8")
             return {
                 "type": "platt", "engine": "builtin", "format": "json",
-                "feature_schema_version": schema, "normalization_version": "alignment-text-normalization-v1",
+                "feature_schema_version": schema, "normalization_version": "alignment-text-normalization-v2",
                 "artifact_path": str(path), "artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "feature_names": features,
             }

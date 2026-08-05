@@ -20,7 +20,7 @@ _CALIBRATOR_SCHEMA = "platt-calibrator-v1"
 _CALIBRATOR_ENGINE = "builtin"
 _CALIBRATOR_FORMAT = "json"
 _FEATURE_SCHEMA_VERSION = "char-alignment-v2"
-_NORMALIZATION_VERSION = "alignment-text-normalization-v1"
+_NORMALIZATION_VERSION = "alignment-text-normalization-v2"
 _CALIBRATOR_FEATURES = (
     "target_score",
     "native_char_coverage",
@@ -57,8 +57,9 @@ _PERFORMANCE_MODE_CODES = {
 
 
 def fold(text: str) -> str:
-    value = unicodedata.normalize("NFKD", str(text or "").casefold())
-    return "".join(char for char in value if not unicodedata.combining(char))
+    """Fold only case and presentation variants; retain German contrasts."""
+    value = unicodedata.normalize("NFC", str(text or "").lower()).replace("\u2019", "'")
+    return value
 
 
 def tokens(text: str) -> list[str]:

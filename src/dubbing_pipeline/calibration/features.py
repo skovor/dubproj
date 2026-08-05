@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 FEATURE_SCHEMA_VERSION = "char-alignment-v2"
-NORMALIZATION_VERSION = "alignment-text-normalization-v1"
+NORMALIZATION_VERSION = "alignment-text-normalization-v2"
 TARGET_FEATURES = (
     "target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score",
     "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio",

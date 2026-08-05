@@ -44,19 +44,19 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
     artifact.write_text(json.dumps({
         "schema": "platt-calibrator-v1",
         "feature_schema_version": "char-alignment-v2",
-        "normalization_version": "alignment-text-normalization-v1",
+        "normalization_version": "alignment-text-normalization-v2",
         "features": target_features,
         "coefficients": [1.2, .8, .7, .7, .4, -1.0, -1.0, -1.0, -1.0, -.3, 0.0, 0.0, 0.0, 0.0],
         "intercept": -1.1,
         "normalization": normalization,
     }), encoding="utf-8")
     final_artifact.write_text(json.dumps({
-        "schema": "platt-calibrator-v1", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v1",
+        "schema": "platt-calibrator-v1", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v2",
         "features": final_features, "coefficients": [1.2, .8, .7, .7, -.01, -1.0, -1.0, -1.0, -1.0], "intercept": -1.1, "normalization": final_normalization,
     }), encoding="utf-8")
     lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "ctc_target_probability", "duration_seconds", "speech_ratio", "performance_mode"]
     lid_artifact.write_text(json.dumps({
-        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v1",
+        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v2",
         "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0], "intercept": 0.0,
         "normalization": [{"mean": 0.0, "scale": 1.0} for _ in lid_features],
     }), encoding="utf-8")
@@ -83,9 +83,9 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "source_lid_probability": .70,
         },
         "calibrators": {
-            "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v1", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
-            "final_anchor": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v1", "feature_names": final_features, "artifact_path": str(final_artifact), "artifact_sha256": sha256_file(final_artifact)},
-            "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v1", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
+        "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v2", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
+        "final_anchor": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v2", "feature_names": final_features, "artifact_path": str(final_artifact), "artifact_sha256": sha256_file(final_artifact)},
+        "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v2", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
         },
         "dataset": {
             "manifest_sha256": "a" * 64,
@@ -400,7 +400,7 @@ class V2QATests(unittest.TestCase):
     def test_alignment_normalization_is_versioned_and_shared(self):
         self.assertEqual(normalize_alignment_text("geht\u2019s"), normalize_alignment_text("geht's"))
         self.assertEqual(normalize_alignment_text("F\u00fcr n\u00e4chste!"), normalize_alignment_text("F\u00fcrn\u00e4chste"))
-        self.assertEqual(AlignmentTextPolicy().version, "alignment-text-normalization-v1")
+        self.assertEqual(AlignmentTextPolicy().version, "alignment-text-normalization-v2")
 
     def test_sequence_character_alignment_preserves_insertions_deletions_and_apostrophes(self):
         def rows(value: str):

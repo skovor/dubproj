@@ -20,6 +20,8 @@ from typing import Any, Mapping, Protocol
 from .contracts import EvidenceFamily, EvidenceRecord
 from .hashing import atomic_json, canonical_json, contract_hash, sha256_bytes, sha256_file
 
+TEXT_NORMALIZATION_POLICY_VERSION = "alignment-text-normalization-v2"
+
 
 class AlignmentUnavailable(RuntimeError):
     """Raised when an optional alignment family is not installed/configured."""
@@ -29,7 +31,7 @@ class AlignmentUnavailable(RuntimeError):
 class AlignmentTextPolicy:
     """Versioned text normalization shared by expected and observed streams."""
 
-    version: str = "alignment-text-normalization-v1"
+    version: str = TEXT_NORMALIZATION_POLICY_VERSION
     keep_apostrophe: bool = True
     ignore_punctuation: bool = True
 
@@ -45,18 +47,17 @@ def normalize_alignment_text(text: str, policy: AlignmentTextPolicy = DEFAULT_AL
         if char.isspace():
             continue
         if char.isalnum():
-            result.append(char.casefold())
+            result.append(char.lower())
         elif char == "'" and policy.keep_apostrophe:
             result.append("'")
         elif not policy.ignore_punctuation:
-            result.append(char.casefold())
+            result.append(char.lower())
     return result
 
 
 def _fold_word(value: Any) -> str:
-    """Compare aligned words without punctuation/diacritic differences."""
-    normal = unicodedata.normalize("NFKD", str(value or "").casefold())
-    normal = "".join(char for char in normal if not unicodedata.combining(char))
+    """Compare lexical words while preserving German phonemic contrasts."""
+    normal = unicodedata.normalize("NFC", str(value or "").lower())
     return re.sub(r"[^\w]+", "", normal, flags=re.UNICODE)
 
 
@@ -87,7 +88,7 @@ class AlignmentCache:
     model_id: str = "unknown"
     model_revision: str = "unknown"
     feature_schema_version: str = "char-alignment-v2"
-    normalization_version: str = "alignment-text-normalization-v1"
+    normalization_version: str = TEXT_NORMALIZATION_POLICY_VERSION
 
     def _key(self, audio_sha256: str, text: str, language: str) -> str:
         return sha256_bytes(canonical_json({
@@ -146,7 +147,7 @@ class AlignmentReading:
     duration: float | None = None
     characters_per_second: float | None = None
     words_per_second: float | None = None
-    normalization_version: str = "alignment-text-normalization-v1"
+    normalization_version: str = TEXT_NORMALIZATION_POLICY_VERSION
     final_anchor_evidence: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -283,7 +284,7 @@ def _normalise_char(value: Any, policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_
     char = normal[0]
     if not (char.isalnum() or (char == _APOSTROPHE and policy.keep_apostrophe)) and policy.ignore_punctuation:
         return None
-    return char, char.casefold()
+    return char, char.lower()
 
 
 def _expected_characters(text: str, policy: AlignmentTextPolicy = DEFAULT_ALIGNMENT_TEXT_POLICY) -> list[dict[str, Any]]:

@@ -37,7 +37,7 @@ def _artifact_spec(value: Mapping[str, Any], role: str, identity: Mapping[str, A
     normalization = payload.get("normalization")
     if not features or len(features) != len(coefficients) or not isinstance(normalization, list) or len(normalization) != len(features):
         raise PromotionError(f"{role} artifact is incomplete")
-    spec = {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": expected_schema, "normalization_version": str(payload.get("normalization_version", "alignment-text-normalization-v1")), "feature_names": features, "artifact_path": str(artifact_path), "artifact_sha256": artifact_sha}
+    spec = {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": expected_schema, "normalization_version": str(payload.get("normalization_version", "alignment-text-normalization-v2")), "feature_names": features, "artifact_path": str(artifact_path), "artifact_sha256": artifact_sha}
     return spec, payload
 
 
