@@ -18,6 +18,11 @@ Código auditado: `0cca1f257cd115c24b4f84eeb1fe2002f1a23485` en
   carga real en `cuda:0`/`float16` en `2.217 s`.
 - FFmpeg `9.0-essentials_build-www.gyan.dev`: smoke de seno, código `0`.
 
+El workflow `.github/workflows/ci.yml` quedó versionado y publicado en
+`dc5cdeb727290426e1f1f180710b4d4478a0372b`. Ejecuta la suite en GitHub-hosted
+Ubuntu con Python 3.12, pero todavía no se cuenta una ejecución observada de
+Actions; por eso este informe no convierte las pruebas locales en evidencia CI.
+
 ## Cambios integrados
 
 Se hicieron commits atómicos para calibración target/final/LID, parsing real de

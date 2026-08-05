@@ -2,6 +2,13 @@
   "schema": "dubproj-final-verification-v1",
   "status": "IMPLEMENTED_BUT_REAL_VALIDATION_BLOCKED",
   "validated_code_commit": "0cca1f257cd115c24b4f84eeb1fe2002f1a23485",
+  "ci": {
+    "workflow": ".github/workflows/ci.yml",
+    "workflow_commit": "dc5cdeb727290426e1f1f180710b4d4478a0372b",
+    "configured": true,
+    "observed_github_run": false,
+    "note": "Workflow was pushed; an independent GitHub-hosted run must appear before CI evidence is claimed."
+  },
   "branch": "refactor/p3r-pipeline-v2",
   "audit_spec": "docs/AUDITORIA_PROFUNDA_DUBPROJ_27ca23e.md",
   "installation": {
