@@ -20,13 +20,15 @@ class FinalValidationTests(unittest.TestCase):
 
     def test_second_game_requires_decoded_audio_and_extraction_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp); audio=root/"audio.wav"; reference=root/"reference.wav"
-            import soundfile as sf, numpy as np, hashlib
+            root=Path(tmp); audio=root/"audio.wav"; reference=root/"reference.wav"; source=root/"source.pak"
+            import soundfile as sf, numpy as np, hashlib, base64, inspect
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
             sf.write(audio, np.zeros(2400, dtype="float32"), 24000); sf.write(reference, np.zeros(2400, dtype="float32"), 24000)
-            code = "a" * 40; payload={"schema":"second-game-extraction-receipt-v1","scene_id":"s","game_id":"other","audio_sha256":sha256_file(audio),"reference_sha256":sha256_file(reference),"source_container_sha256":"c"*64,"extractor_id":"dq3-tool","extractor_version":"1.0","code_commit":code,"timing":{"start":0,"end":1}}
+            source.write_bytes(b"real-container"); code = "a" * 40; source_sha=sha256_file(source); extractor_sha=hashlib.sha256(Path(inspect.getsourcefile(SecondGameAdapter)).read_bytes()).hexdigest(); timing={"start":0,"end":.05}; public_private=Ed25519PrivateKey.generate(); public=base64.b64encode(public_private.public_key().public_bytes_raw()).decode("ascii"); private_b64=base64.b64encode(public_private.private_bytes_raw()).decode("ascii"); trust={"schema":"attestation-trust-store-v1","keys":{"ci":{"algorithm":"ed25519","public_key":public,"public_key_sha256":hashlib.sha256(base64.b64decode(public)).hexdigest(),"allowed_repository":"skovor/dubproj","allowed_workflow":".github/workflows/ci.yml"}}}
+            subject={"schema":"second-game-extraction-subject-v1","repository":"skovor/dubproj","workflow":".github/workflows/ci.yml","game_id":"other","scene_id":"s","source_container_sha256":source_sha,"audio_sha256":sha256_file(audio),"reference_sha256":sha256_file(reference),"timing":timing,"extractor_id":"dq3-tool","extractor_version":"1.0","extractor_source_sha256":extractor_sha,"code_commit":code}; attestation=sign_attestation(subject, private_b64, key_id="ci"); payload={**subject,"receipt_schema":"second-game-extraction-receipt-v1","schema":"second-game-extraction-receipt-v1","source_container_sha256":source_sha,"attestation":attestation}
             receipt={**payload,"receipt_sha256":sha256_bytes(canonical_json(payload))}
-            manifest={"scenes":[{"scene_id":"s","game_id":"other","audio_path":str(audio),"reference_path":str(reference),"audio_sha256":sha256_file(audio),"reference_sha256":sha256_file(reference),"timing":{"start":0,"end":1},"extraction_status":"VERIFIED","extraction_receipt":receipt}]}
-            result=SecondGameAdapter("other").validate(manifest, expected_commit=code)
+            manifest={"scenes":[{"scene_id":"s","game_id":"other","audio_path":str(audio),"reference_path":str(reference),"audio_sha256":sha256_file(audio),"reference_sha256":sha256_file(reference),"timing":timing,"source_container_path":str(source),"source_container_sha256":source_sha,"extractor_id":"dq3-tool","extractor_version":"1.0","extractor_source_sha256":extractor_sha,"code_commit":code,"extraction_status":"VERIFIED","extraction_receipt":receipt}]}
+            result=SecondGameAdapter("other").validate(manifest, expected_commit=code, attestation_trust_store=trust, attestation_key_id="ci")
             self.assertTrue(result["valid"]); self.assertTrue(result["independent_adapter"])
     def test_manifest_is_content_addressed(self):
         with tempfile.TemporaryDirectory() as tmp:

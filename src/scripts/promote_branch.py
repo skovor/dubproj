@@ -23,7 +23,7 @@ def _load_adapter(entrypoint: str, repository_root: Path):
     return adapter
 
 
-def execute_second_game_adapter(descriptor: dict, repository_root: Path, *, expected_commit: str | None = None) -> dict:
+def execute_second_game_adapter(descriptor: dict, repository_root: Path, *, expected_commit: str | None = None, attestation_trust_store: dict | None = None, attestation_key_id: str | None = None) -> dict:
     """Execute an adapter and recompute evidence; descriptor booleans are ignored."""
     entrypoint=str(descriptor.get("adapter_entrypoint") or "")
     manifest_path=Path(str(descriptor.get("manifest_path") or ""))
@@ -34,7 +34,7 @@ def execute_second_game_adapter(descriptor: dict, repository_root: Path, *, expe
         manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
         game_id=str(descriptor.get("game_id") or manifest.get("game_id") or "")
         adapter=adapter_type(game_id) if isinstance(adapter_type, type) else adapter_type
-        evidence=adapter.validate(manifest, expected_commit=expected_commit)
+        evidence=adapter.validate(manifest, expected_commit=expected_commit, attestation_trust_store=attestation_trust_store, attestation_key_id=attestation_key_id)
         if not isinstance(evidence, dict):
             return {"valid": False, "errors": ["SECOND_GAME_ADAPTER_INVALID_RESULT"]}
         return {"executed": True, "adapter_entrypoint": entrypoint, "manifest_path": str(manifest_path.resolve()), "recomputed": evidence, "valid": bool(evidence.get("valid")), "content_verified": bool(evidence.get("content_verified")), "independent_adapter": bool(evidence.get("independent_adapter")), "game_id": evidence.get("game_id")}
@@ -54,6 +54,7 @@ def main()->int:
     unsigned_payload={key: value for key, value in benchmark.items() if key not in {"evidence_sha256", "attestation"}}
     runner_source_sha = str((benchmark.get("runner_identity") or {}).get("source_sha256", ""))
     subject={"schema":"benchmark-attestation-subject-v1","repository":"skovor/dubproj","workflow":".github/workflows/ci.yml","manifest_digest":benchmark.get("manifest_digest"),"code_commit":manifest.commit,"benchmark_payload_sha256":subject_digest(unsigned_payload),"runner_source_sha256":runner_source_sha}
+    trust_store = None
     try:
         trust_store=load_trust_store(args.attestation_trust_store)
         if not verify_trusted_attestation(benchmark.get("attestation") or {}, trust_store, key_id=args.attestation_key_id, expected_subject=subject, expected_commit=args.expected_commit, repository="skovor/dubproj", workflow=".github/workflows/ci.yml"): errors.append({"code":"BENCHMARK_ATTESTATION_INVALID"})
@@ -80,7 +81,7 @@ def main()->int:
     for line_id, row in zip(manifest.line_ids, rows):
         row_evidence=verify_benchmark_row(line_id, row, expected_commit=args.expected_commit)
         if not row_evidence["valid"]: errors.append({"code":"BENCHMARK_ROW_ARTIFACT_UNVERIFIED","line_id":line_id,"details":row_evidence})
-    second=execute_second_game_adapter(second_descriptor, Path(__file__).resolve().parents[1], expected_commit=args.expected_commit)
+    second=execute_second_game_adapter(second_descriptor, Path(__file__).resolve().parents[1], expected_commit=args.expected_commit, attestation_trust_store=trust_store, attestation_key_id=args.attestation_key_id)
     if not second.get("valid") or not second.get("independent_adapter") or not second.get("content_verified"): errors.append({"code":"SECOND_GAME_EVIDENCE_MISSING","details":second})
     result={"promotable":not errors,"errors":errors,"benchmark":benchmark.get("manifest_digest"),"second_game":second.get("game_id"),"manifest_validation":validation,"second_game_recomputed":second}; print(json.dumps(result,indent=2)); return 0 if not errors else 2
 if __name__=="__main__": raise SystemExit(main())
