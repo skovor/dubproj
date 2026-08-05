@@ -11,6 +11,7 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import parse_qs, urlparse
 import sys
 
@@ -18,11 +19,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dubbing_pipeline.goldset import GoldsetStore, HumanLabel
 
 
+def parse_token_specs(values: list[str] | None) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values or []:
+        identity, separator, token = str(value).partition(":")
+        if not separator or not identity.strip() or not token.strip():
+            raise ValueError("tokens must use identity:secret format")
+        result[identity.strip()] = token.strip()
+    return result
+
+
+def authorized_identity(headers: Mapping[str, str], expected: Mapping[str, str], identity: str) -> bool:
+    token = headers.get("X-Goldset-Token", "")
+    return bool(expected) and expected.get(identity) == token
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("database")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--reviewer-token", action="append", default=[], help="identity:secret; repeat for each reviewer")
+    parser.add_argument("--adjudicator-token", action="append", default=[], help="identity:secret; repeat for each adjudicator")
+    parser.add_argument("--operator-token", action="append", default=[], help="identity:secret for hidden evaluation")
     args = parser.parse_args()
+    reviewer_tokens = parse_token_specs(args.reviewer_token)
+    adjudicator_tokens = parse_token_specs(args.adjudicator_token)
+    operator_tokens = parse_token_specs(args.operator_token)
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, payload: dict) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -61,14 +83,23 @@ def main() -> int:
 
         def _dispatch_post(self, path: str, body: dict, store: GoldsetStore) -> None:
             if path == "/claim":
-                clip = store.claim(str(body.get("reviewer_id", "")), split=body.get("split"), lease_seconds=int(body.get("lease_seconds", 900)))
+                reviewer_id = str(body.get("reviewer_id", ""))
+                if body.get("split") == "hidden_test":
+                    self._send(403, {"error": "hidden_test uses the isolated evaluation endpoint"}); return
+                if not authorized_identity(self.headers, reviewer_tokens, reviewer_id):
+                    self._send(403, {"error": "reviewer token is not authorized"}); return
+                clip = store.claim(reviewer_id, split=body.get("split"), lease_seconds=int(body.get("lease_seconds", 900)))
                 self._send(200, {"clip": clip.review_payload() if clip else None})
                 return
             if path == "/release":
+                if not authorized_identity(self.headers, reviewer_tokens, str(body.get("reviewer_id", ""))):
+                    self._send(403, {"error": "reviewer token is not authorized"}); return
                 store.release_claim(str(body["clip_id"]), str(body["reviewer_id"]))
                 self._send(200, {"released": True})
                 return
             if path == "/label":
+                if not authorized_identity(self.headers, reviewer_tokens, str(body.get("reviewer_id", ""))):
+                    self._send(403, {"error": "reviewer token is not authorized"}); return
                 allowed = {"clip_id", "reviewer_id", "label", "labels", "severity", "region_start", "region_end", "affected_tokens", "comment", "confidence", "needs_context"}
                 unknown = set(body) - allowed
                 if unknown:
@@ -80,8 +111,17 @@ def main() -> int:
                 self._send(200, {"saved": True})
                 return
             if path == "/adjudicate":
+                if not authorized_identity(self.headers, adjudicator_tokens, str(body.get("adjudicator_id", ""))):
+                    self._send(403, {"error": "adjudicator token is not authorized"}); return
                 store.adjudicate(str(body["clip_id"]), str(body["adjudicator_id"]), body.get("consensus_labels") or (), comment=str(body.get("comment", "")))
                 self._send(200, {"adjudicated": True})
+                return
+            if path == "/hidden/evaluate":
+                operator_id = str(body.get("operator_id", ""))
+                if not authorized_identity(self.headers, operator_tokens, operator_id):
+                    self._send(403, {"error": "operator token is not authorized"}); return
+                receipt = store.open_hidden_evaluation(operator_id, str(body.get("run_id", "")))
+                self._send(200, {"receipt": receipt})
                 return
             raise ValueError("unknown endpoint")
 

@@ -36,6 +36,23 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaises(ValueError): extract_goldset_features(store, lambda _clip: {}, Path(tmp) / "features")
             store.close()
 
+    def test_hidden_bridge_requires_and_verifies_one_shot_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite")
+            clip = ClipRecord("h", "b" * 64, "scene", "hidden-line", "take", "speaker", "Hallo", split="hidden_test")
+            store.add_clip(clip)
+            for reviewer in ("r1", "r2"):
+                store.save_label(HumanLabel("h", reviewer, labels=("CORRECT_NEUTRAL",)))
+            store.seal_hidden_test("operator")
+            evidence = {"raw_target_score": .9, "expected_characters": 5, "expected_words": 1, "native_char_coverage": 1.0, "mean_char_score": .9, "minimum_char_score": .8, "p10_char_score": .85, "delete_count": 0, "substitute_count": 0, "insert_count": 0, "interpolated_count": 0, "compression_ratio": 1.0, "duration": 1.0, "final_anchor_evidence": {"coverage": 1.0, "minimum_score": .8, "mean_score": .9, "duration_ms": 200, "gap_to_active_speech_end_ms": 20, "deleted_characters": 0, "substituted_characters": 0, "insertions_inside_anchor": 0, "interpolated": False}}
+            lid = {"probabilities": {"en": .05, "de": .9}, "language": "de", "probability": .9, "duration_seconds": 1.0, "speech_ratio": .8}
+            with self.assertRaises(ValueError):
+                extract_goldset_features(store, lambda _clip: {"target": evidence, "final": evidence, "lid": lid}, Path(tmp) / "features")
+            receipt = store.open_hidden_evaluation("operator", "run-hidden")
+            result = extract_goldset_features(store, lambda _clip: {"target": evidence, "final": evidence, "lid": lid}, Path(tmp) / "features", hidden_evaluation_receipt=receipt)
+            self.assertEqual(result["hidden_evaluation_receipt"]["run_id"], "run-hidden")
+            store.close()
+
     def test_adjudicated_consensus_is_the_only_calibration_label(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = GoldsetStore(Path(tmp) / "gold.sqlite")

@@ -42,6 +42,9 @@ def extract_goldset_features(
     output_dir: str | Path,
     *,
     require_hidden_seal: bool = True,
+    hidden_evaluation_receipt: Mapping[str, Any] | None = None,
+    hidden_operator_id: str | None = None,
+    hidden_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Materialize target/final/LID JSONL datasets from frozen evidence.
 
@@ -53,8 +56,14 @@ def extract_goldset_features(
     validation = validate_goldset(clips, reviewer_labels, require_double_review=True, hidden_sealed=bool(seal))
     if not validation["valid"]:
         raise ValueError("gold set is not ready: " + "; ".join(validation["errors"]))
-    if require_hidden_seal and any(clip.split == "hidden_test" for clip in clips) and seal is None:
-        raise ValueError("hidden test must be sealed before feature extraction")
+    hidden_present = any(clip.split == "hidden_test" for clip in clips)
+    if require_hidden_seal and hidden_present:
+        if seal is None or not store.verify_hidden_seal():
+            raise ValueError("hidden test seal is missing or invalid")
+        if hidden_evaluation_receipt is None and hidden_operator_id and hidden_run_id:
+            hidden_evaluation_receipt = store.open_hidden_evaluation(hidden_operator_id, hidden_run_id)
+        if hidden_evaluation_receipt is None or not store.verify_hidden_evaluation_receipt(hidden_evaluation_receipt):
+            raise ValueError("hidden evaluation receipt is required and must be issued by the sealed store")
     by_clip = _labels_by_clip(labels)
     target_rows: list[dict[str, Any]] = []; final_rows: list[dict[str, Any]] = []; lid_rows: list[dict[str, Any]] = []
     for clip in clips:
@@ -90,7 +99,7 @@ def extract_goldset_features(
             split_rows = [row for row in rows if row.get("split") == split]
             paths_by_split.setdefault(role, {})[split] = str(path)
             sha_by_split.setdefault(role, {})[split] = _write_jsonl(path, split_rows)
-    return {"schema": "goldset-feature-bridge-v2", "paths": {key: str(path) for key, path in paths.items()}, "paths_by_split": paths_by_split, "sha256": digests, "sha256_by_split": sha_by_split, "counts": {"target": len(target_rows), "final_anchor": len(final_rows), "lid": len(lid_rows)}, "counts_by_split": {role: {split: sum(1 for row in rows if row.get("split") == split) for split in ("calibration", "validation", "hidden_test")} for role, rows in rows_by_role.items()}, "hidden_seal": seal}
+    return {"schema": "goldset-feature-bridge-v2", "paths": {key: str(path) for key, path in paths.items()}, "paths_by_split": paths_by_split, "sha256": digests, "sha256_by_split": sha_by_split, "counts": {"target": len(target_rows), "final_anchor": len(final_rows), "lid": len(lid_rows)}, "counts_by_split": {role: {split: sum(1 for row in rows if row.get("split") == split) for split in ("calibration", "validation", "hidden_test")} for role, rows in rows_by_role.items()}, "hidden_seal": seal, "hidden_evaluation_receipt": hidden_evaluation_receipt}
 
 
 __all__ = ["extract_goldset_features"]

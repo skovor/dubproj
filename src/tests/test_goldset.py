@@ -1,6 +1,7 @@
 from __future__ import annotations
 import tempfile, unittest
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from dubbing_pipeline.goldset import ClipRecord, GoldsetStore, HumanLabel, stable_split, validate_goldset
 
 SHA = "a" * 64
@@ -81,6 +82,39 @@ class GoldsetTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.mark_hidden_opened("other")
             self.assertEqual(store.hidden_seal()["digest"], seal["digest"])
+            store.close()
+
+    def test_normal_claim_cannot_return_or_request_hidden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite")
+            store.add_clip(clip("cal", "cal-line", "calibration"))
+            store.add_clip(clip("hidden", "hidden-line", "hidden_test"))
+            self.assertEqual(store.claim("reviewer", split="calibration").clip_id, "cal")
+            with self.assertRaises(PermissionError):
+                store.claim("reviewer", split="hidden_test")
+            self.assertIsNone(store.claim("reviewer"))
+            store.close()
+
+    def test_hidden_evaluation_is_atomic_one_shot_and_tamper_evident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite")
+            store.add_clip(clip("hidden", "hidden-line", "hidden_test"))
+            store.seal_hidden_test("operator")
+            receipts = []
+            def open_once():
+                try:
+                    receipts.append(store.open_hidden_evaluation("operator", "run-1"))
+                except ValueError:
+                    return
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(lambda _: open_once(), range(2)))
+            self.assertEqual(len(receipts), 1)
+            receipt = receipts[0]
+            self.assertTrue(store.verify_hidden_evaluation_receipt(receipt))
+            tampered = dict(receipt); tampered["clips"] = []
+            self.assertFalse(store.verify_hidden_evaluation_receipt(tampered))
+            with self.assertRaises(ValueError):
+                store.open_hidden_evaluation("operator", "run-2")
             store.close()
 
 if __name__ == "__main__": unittest.main()

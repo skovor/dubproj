@@ -158,6 +158,10 @@ class GoldsetStore:
                 seal_id TEXT PRIMARY KEY, operator_id TEXT NOT NULL, digest TEXT NOT NULL,
                 created_at TEXT NOT NULL, opened_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS hidden_evaluations (
+                receipt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE,
+                payload TEXT NOT NULL, receipt_sha256 TEXT NOT NULL
+            );
         """)
         self._migrate_claims()
         self._db.commit()
@@ -208,11 +212,13 @@ class GoldsetStore:
             self.add_clip(clip)
 
     @_db_locked
-    def claim(self, reviewer_id: str, *, split: str | None = None, lease_seconds: int = 900) -> ClipRecord | None:
+    def claim(self, reviewer_id: str, *, split: str | None = None, lease_seconds: int = 900, allow_hidden: bool = False) -> ClipRecord | None:
         from datetime import datetime, timedelta, timezone
         reviewer_id = _text(reviewer_id)
         if not reviewer_id or lease_seconds <= 0:
             raise ValueError("reviewer_id and positive lease_seconds are required")
+        if split == "hidden_test" and not allow_hidden:
+            raise PermissionError("hidden_test claims require the isolated hidden evaluation flow")
         now = datetime.now(timezone.utc)
         now_text = now.isoformat()
         expires_text = (now + timedelta(seconds=int(lease_seconds))).isoformat()
@@ -221,6 +227,8 @@ class GoldsetStore:
             WHERE NOT EXISTS (SELECT 1 FROM labels l WHERE l.clip_id=c.clip_id AND l.reviewer_id=?)
               AND NOT EXISTS (SELECT 1 FROM claims q WHERE q.clip_id=c.clip_id AND q.reviewer_id=? AND q.lease_expires_at>?)"""
         args: list[Any] = [reviewer_id, reviewer_id, now_text]
+        if not allow_hidden:
+            query += " AND c.split != 'hidden_test'"
         if split:
             query += " AND c.split=?"; args.append(split)
         row = self._db.execute(query + " ORDER BY c.clip_id LIMIT 1", args).fetchone()
@@ -294,6 +302,49 @@ class GoldsetStore:
         from datetime import datetime, timezone
         self._db.execute("UPDATE hidden_seal SET opened_at=? WHERE seal_id=?", (datetime.now(timezone.utc).isoformat(), seal["seal_id"])); self._db.commit()
         return self.hidden_seal() or {}
+
+    @_db_locked
+    def open_hidden_evaluation(self, operator_id: str, run_id: str) -> dict[str, Any]:
+        """Atomically consume the sealed hidden set and issue one receipt."""
+        from datetime import datetime, timezone
+        operator_id = _text(operator_id); run_id = _text(run_id)
+        if not operator_id or not run_id:
+            raise ValueError("operator_id and run_id are required")
+        self._db.execute("BEGIN IMMEDIATE")
+        seal_row = self._db.execute("SELECT seal_id, operator_id, digest, created_at, opened_at FROM hidden_seal LIMIT 1").fetchone()
+        if seal_row is None:
+            self._db.rollback(); raise ValueError("hidden test is not sealed")
+        seal = dict(seal_row)
+        if seal.get("opened_at"):
+            self._db.rollback(); raise ValueError("hidden test has already been opened")
+        if operator_id != str(seal.get("operator_id", "")):
+            self._db.rollback(); raise PermissionError("only the sealing operator may open the hidden test")
+        if sha256_bytes(canonical_json(self._hidden_seal_payload())) != str(seal["digest"]).casefold():
+            self._db.rollback(); raise ValueError("hidden seal digest mismatch")
+        opened_at = datetime.now(timezone.utc).isoformat()
+        rows = [dict(row) for row in self._db.execute("SELECT clip_id, audio_sha256, split, split_group FROM clips WHERE split='hidden_test' ORDER BY clip_id")]
+        payload = {"schema": "hidden-evaluation-receipt-v1", "run_id": run_id, "operator_id": operator_id, "seal_id": seal["seal_id"], "seal_digest": seal["digest"], "opened_at": opened_at, "clips": rows}
+        receipt_sha = sha256_bytes(canonical_json(payload))
+        receipt = {**payload, "receipt_id": f"hidden-eval-{receipt_sha[:16]}", "receipt_sha256": receipt_sha}
+        self._db.execute("INSERT INTO hidden_evaluations VALUES (?, ?, ?, ?)", (receipt["receipt_id"], run_id, canonical_json(receipt), receipt_sha))
+        self._db.execute("UPDATE hidden_seal SET opened_at=? WHERE seal_id=?", (opened_at, seal["seal_id"]))
+        self._db.commit()
+        return receipt
+
+    @_db_locked
+    def verify_hidden_evaluation_receipt(self, receipt: Mapping[str, Any]) -> bool:
+        if not verify_hidden_evaluation_receipt_payload(receipt):
+            return False
+        seal = self.hidden_seal()
+        if seal is None or str(receipt.get("seal_id")) != str(seal.get("seal_id")) or str(receipt.get("seal_digest")) != str(seal.get("digest")):
+            return False
+        if not seal.get("opened_at") or str(receipt.get("opened_at")) != str(seal.get("opened_at")):
+            return False
+        row = self._db.execute("SELECT payload FROM hidden_evaluations WHERE receipt_id=? AND run_id=?", (receipt.get("receipt_id"), receipt.get("run_id"))).fetchone()
+        if row is None or json.loads(row["payload"]) != dict(receipt):
+            return False
+        actual = [dict(item) for item in self._db.execute("SELECT clip_id, audio_sha256, split, split_group FROM clips WHERE split='hidden_test' ORDER BY clip_id")]
+        return actual == list(receipt.get("clips") or []) and self.verify_hidden_seal()
 
     @_db_locked
     def clips(self) -> list[ClipRecord]:
@@ -407,4 +458,16 @@ def manifest_hash(path: str | Path) -> str:
     return sha256_file(path)
 
 
-__all__ = ["LABELS", "SPLITS", "ClipRecord", "HumanLabel", "GoldsetStore", "stable_split", "validate_goldset", "manifest_hash"]
+def verify_hidden_evaluation_receipt_payload(receipt: Mapping[str, Any]) -> bool:
+    """Verify the receipt's canonical self-digest without trusting its claims."""
+    if not isinstance(receipt, Mapping) or receipt.get("schema") != "hidden-evaluation-receipt-v1":
+        return False
+    try:
+        expected = str(receipt["receipt_sha256"])
+        payload = {key: receipt[key] for key in ("schema", "run_id", "operator_id", "seal_id", "seal_digest", "opened_at", "clips")}
+    except (KeyError, TypeError):
+        return False
+    return expected == sha256_bytes(canonical_json(payload)) and str(receipt.get("receipt_id", "")) == f"hidden-eval-{expected[:16]}"
+
+
+__all__ = ["LABELS", "SPLITS", "ClipRecord", "HumanLabel", "GoldsetStore", "stable_split", "validate_goldset", "manifest_hash", "verify_hidden_evaluation_receipt_payload"]
