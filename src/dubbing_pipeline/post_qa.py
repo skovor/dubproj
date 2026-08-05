@@ -193,6 +193,8 @@ def audit_scene_stage(
     expected_channels: int | None = None,
     protected_intervals_ok: bool | None = None,
     untouched_channels_ok: bool | None = None,
+    line_windows: list[dict[str, Any]] | None = None,
+    contextual_leak: bool | None = None,
 ) -> StageAudit:
     """Audit a full mounted scene after serialization and reopening."""
     if stage not in {"SERIALIZED_QA", "SCENE_QA"}:
@@ -210,6 +212,20 @@ def audit_scene_stage(
             "channels": GateEvidence("channels", GateStatus.NOT_APPLICABLE if expected_channels is None else (GateStatus.PASS if audio.shape[1] == expected_channels else GateStatus.FAIL), measured_value=int(audio.shape[1]), threshold=expected_channels, units="channels"),
             "frames": GateEvidence("frames", GateStatus.NOT_APPLICABLE if expected_frames is None else (GateStatus.PASS if len(audio) == expected_frames else GateStatus.FAIL), measured_value=int(len(audio)), threshold=expected_frames, units="frames"),
         }
+        peak=float(np.max(np.abs(audio))) if len(audio) else 0.0
+        clipping=int(np.sum(np.abs(audio) >= 0.999))
+        rms=float(np.sqrt(np.mean(np.square(audio)))) if len(audio) else 0.0
+        gates["scene_clipping"] = GateEvidence("scene_clipping", GateStatus.PASS if clipping == 0 else GateStatus.FAIL, measured_value=clipping, threshold=0, units="samples")
+        gates["scene_active_loudness"] = GateEvidence("scene_active_loudness", GateStatus.PASS if rms > 1e-6 else GateStatus.FAIL, measured_value=20.0 * float(np.log10(max(rms, 1e-12))), threshold=-120.0, units="dBFS")
+        gates["scene_peak"] = GateEvidence("scene_peak", GateStatus.PASS if peak <= 1.0 else GateStatus.FAIL, measured_value=peak, threshold=1.0, units="normalized")
+        if line_windows is None:
+            gates["line_window_topology"] = GateEvidence("line_window_topology", GateStatus.NOT_APPLICABLE)
+        else:
+            ordered=sorted(line_windows, key=lambda item: (int(item.get("start", 0)), int(item.get("end", 0))))
+            valid=all(0 <= int(item.get("start", -1)) < int(item.get("end", -1)) <= len(audio) for item in ordered)
+            valid=valid and all(int(left.get("end", 0)) <= int(right.get("start", 0)) for left, right in zip(ordered, ordered[1:]))
+            gates["line_window_topology"] = GateEvidence("line_window_topology", GateStatus.PASS if valid else GateStatus.FAIL, measured_value=valid, details={"line_count": len(ordered)})
+        gates["contextual_leak"] = GateEvidence("contextual_leak", GateStatus.NOT_APPLICABLE if contextual_leak is None else (GateStatus.FAIL if contextual_leak else GateStatus.PASS), measured_value=contextual_leak)
         if protected_intervals_ok is not None:
             gates["preserved_intervals"] = GateEvidence("preserved_intervals", GateStatus.PASS if protected_intervals_ok else GateStatus.FAIL, measured_value=protected_intervals_ok)
         else:
@@ -220,7 +236,7 @@ def audit_scene_stage(
             gates["untouched_channels"] = GateEvidence("untouched_channels", GateStatus.NOT_APPLICABLE)
         failures = [name for name, gate in gates.items() if gate.status is GateStatus.FAIL or gate.status is GateStatus.ERROR]
         passed = not failures and all(gate.status is not GateStatus.NOT_RUN for gate in gates.values())
-        diagnostics = {"sample_rate": sample_rate, "frames": int(len(audio)), "channels": int(audio.shape[1]), "failed_gates": failures}
+        diagnostics = {"sample_rate": sample_rate, "frames": int(len(audio)), "channels": int(audio.shape[1]), "peak": peak, "clipping_samples": clipping, "rms_dbfs": 20.0 * float(np.log10(max(rms, 1e-12))), "failed_gates": failures}
         artifact_sha = sha256_file(path)
         qa_hash = contract_hash("qa-v2", {"stage": stage, "artifact_sha256": artifact_sha, "gates": {key: value.to_dict() for key, value in gates.items()}})
         return StageAudit(

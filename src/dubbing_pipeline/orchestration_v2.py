@@ -441,6 +441,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
 
     source_array = None
     stem_rate = None
+    scene_line_windows: list[dict[str, Any]] | None = None
     if scene.topology == "EMBEDDED_FMV":
         source_path = Path(stem_path or scene.source_stem or "")
         if not source_path.is_file():
@@ -448,6 +449,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         source_array, stem_rate = read(source_path, always_2d=True)
         source_array = source_array.copy()
         stem_rate = int(stem_rate)
+        scene_line_windows = [{"line_id": line.id, "start": round(float(line.start) * stem_rate), "end": round(float(line.end) * stem_rate)} for line in scene.lines]
 
     options_by_line: dict[str, list[dict[str, Any]]] = {}
     row_by_id: dict[str, dict[str, Any]] = {}
@@ -833,7 +835,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             persist_audio_atomic(attempt_path, working, stem_rate)
             protected_ok, untouched_ok, integrity = _scene_integrity(source_array, working, scene.lines, scene, stem_rate)
             stage_counts["SCENE_QA"] += 1
-            audit = audit_scene_stage(attempt_path, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok)
+            audit = audit_scene_stage(attempt_path, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok, line_windows=scene_line_windows)
             audit.diagnostics.update({"selection_strategy":"LOCAL_SCENE_REPAIR","local_attempt":index,"integrity":integrity})
             return audit.passed, audit
         local = select_local_scene(generable_lines, options_by_line, source_array, max_candidates_per_line=int(getattr(config,"scene_candidate_options",8)), max_iterations=max(1,int(getattr(config,"scene_selection_max_combinations",64))), mount_line=_mount, audit_scene=_audit, rank=lambda option: rank_candidate_v2(option["mounted_audit"].result))
@@ -846,7 +848,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             mounted_output = out / f"{scene.id}.mounted.wav"
             persist_audio_atomic(mounted_output, selected_working, stem_rate)
             protected_ok, untouched_ok, integrity = _scene_integrity(source_array, selected_working, scene.lines, scene, stem_rate)
-            final_scene_audit = audit_scene_stage(mounted_output, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok)
+            final_scene_audit = audit_scene_stage(mounted_output, expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok, line_windows=scene_line_windows)
             final_scene_audit.diagnostics.update({"integrity": integrity, "selected": True})
             report["mounted_output"] = str(mounted_output)
             report["scene_qa"] = final_scene_audit.to_dict()

@@ -723,6 +723,8 @@ class V2PostTransformTests(unittest.TestCase):
             failed = audit_scene_stage(path, expected_sample_rate=24000, expected_frames=2400, expected_channels=2, protected_intervals_ok=False, untouched_channels_ok=True)
             self.assertFalse(failed.passed)
             self.assertEqual(failed.gates["preserved_intervals"].status, GateStatus.FAIL)
+            self.assertEqual(failed.gates["scene_clipping"].status, GateStatus.PASS)
+            self.assertEqual(failed.gates["scene_peak"].status, GateStatus.PASS)
 
 
 class V2MountDeployTests(unittest.TestCase):
