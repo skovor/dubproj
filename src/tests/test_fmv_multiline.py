@@ -14,5 +14,17 @@ class FMVTests(unittest.TestCase):
         self.assertTrue(result.passed); self.assertEqual(result.attempts,1); self.assertEqual(set(result.selected),{"a","b"}); self.assertLess(len(calls),9)
     def test_blocked_candidate_is_visible(self):
         line=Line("a"); options={"a":[{"candidate":type("C",(),{"candidate_id":"bad"})(),"eligible":True}]}; result=select_local_scene([line],options,[],max_candidates_per_line=1,max_iterations=1,mount_line=lambda *args: (_ for _ in ()).throw(ValueError("seam")),audit_scene=lambda *_:(False,None)); self.assertFalse(result.passed); self.assertTrue(result.matrix)
+    def test_scene_failure_substitutes_only_attributed_line(self):
+        lines=[Line("a"),Line("b")]
+        options={"a":[{"candidate":type("C",(),{"candidate_id":"a1"})(),"eligible":True},{"candidate":type("C",(),{"candidate_id":"a2"})(),"eligible":True}],"b":[{"candidate":type("C",(),{"candidate_id":"b1"})(),"eligible":True}]}
+        audits=[]
+        def audit(_value,index):
+            audits.append(index)
+            return (index == 2, type("Audit",(),{"diagnostics":{"failed_line_ids":["a"]}})())
+        result=select_local_scene(lines,options,[],max_candidates_per_line=2,max_iterations=3,mount_line=lambda value,line,option:value+[(line.id,option["candidate"].candidate_id)],audit_scene=audit)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.selected["a"]["candidate"].candidate_id,"a2")
+        self.assertEqual(result.selected["b"]["candidate"].candidate_id,"b1")
+        self.assertTrue(any(row["action"] == "SUBSTITUTE_ATTRIBUTED_LINE" and row["line_id"] == "a" for row in result.matrix))
 
 if __name__=="__main__": unittest.main()
