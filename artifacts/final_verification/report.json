@@ -3,8 +3,8 @@
   "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
   "validated_code_commit": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
   "branch": "refactor/p3r-pipeline-v2",
-  "remote_head_verified": true,
-  "remote_head": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
+  "validated_remote_code_commit": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
+  "evidence_commit": "642cc997432ef33b81a388972a755c0c5258b722",
   "correction_commits": [
     {"sha": "b349ba8e3b3d1f8fa9a0246d649017294cb69298", "title": "Bind the complete calibration profile to strict promotion receipts"},
     {"sha": "a6f82a5bbaadf35ea2eb5d794d6b55c189254de4", "title": "Fix LID train serving parity and forbid raw CTC authority"},
