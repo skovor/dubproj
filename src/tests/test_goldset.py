@@ -66,4 +66,21 @@ class GoldsetTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_hidden_seal_freezes_membership_labels_and_operator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gold.sqlite"
+            store = GoldsetStore(path)
+            hidden = clip("hidden", "hidden-line", "hidden_test")
+            store.add_clip(hidden)
+            seal = store.seal_hidden_test("lead")
+            self.assertTrue(store.verify_hidden_seal())
+            with self.assertRaises(ValueError):
+                store.add_clip(clip("hidden-2", "hidden-line-2", "hidden_test"))
+            with self.assertRaises(ValueError):
+                store.save_label(HumanLabel("hidden", "reviewer", "CORRECT_NEUTRAL"))
+            with self.assertRaises(ValueError):
+                store.mark_hidden_opened("other")
+            self.assertEqual(store.hidden_seal()["digest"], seal["digest"])
+            store.close()
+
 if __name__ == "__main__": unittest.main()

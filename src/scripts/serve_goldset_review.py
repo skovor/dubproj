@@ -23,8 +23,6 @@ def main() -> int:
     parser.add_argument("database")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    store = GoldsetStore(args.database)
-
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, payload: dict) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -44,47 +42,53 @@ def main() -> int:
         def do_GET(self):
             query = parse_qs(urlparse(self.path).query)
             split = (query.get("split") or [None])[0]
-            clips = [clip.review_payload() for clip in store.clips() if split is None or clip.split == split]
+            if split == "hidden_test":
+                self._send(403, {"error": "hidden test is not exposed through the normal review API"})
+                return
+            with GoldsetStore(args.database) as store:
+                clips = [clip.review_payload() for clip in store.clips() if clip.split != "hidden_test" and (split is None or clip.split == split)]
             self._send(200, {"schema": "goldset-review-v2", "clips": clips})
 
         def do_POST(self):
             try:
                 body = self._body()
                 path = urlparse(self.path).path
-                if path == "/claim":
-                    clip = store.claim(str(body.get("reviewer_id", "")), split=body.get("split"), lease_seconds=int(body.get("lease_seconds", 900)))
-                    self._send(200, {"clip": clip.review_payload() if clip else None})
-                    return
-                if path == "/release":
-                    store.release_claim(str(body["clip_id"]), str(body["reviewer_id"]))
-                    self._send(200, {"released": True})
-                    return
-                if path == "/label":
-                    allowed = {"clip_id", "reviewer_id", "label", "labels", "severity", "region_start", "region_end", "affected_tokens", "comment", "confidence", "needs_context"}
-                    unknown = set(body) - allowed
-                    if unknown:
-                        raise ValueError(f"unknown label fields: {sorted(unknown)}")
-                    value = dict(body)
-                    value["affected_tokens"] = tuple(value.get("affected_tokens") or ())
-                    value["labels"] = tuple(value.get("labels") or ())
-                    store.save_label(HumanLabel(**value))
-                    self._send(200, {"saved": True})
-                    return
-                if path == "/adjudicate":
-                    store.adjudicate(str(body["clip_id"]), str(body["adjudicator_id"]), body.get("consensus_labels") or (), comment=str(body.get("comment", "")))
-                    self._send(200, {"adjudicated": True})
-                    return
-                raise ValueError("unknown endpoint")
+                with GoldsetStore(args.database) as store:
+                    self._dispatch_post(path, body, store)
+                return
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 self._send(400, {"error": str(exc)})
+
+        def _dispatch_post(self, path: str, body: dict, store: GoldsetStore) -> None:
+            if path == "/claim":
+                clip = store.claim(str(body.get("reviewer_id", "")), split=body.get("split"), lease_seconds=int(body.get("lease_seconds", 900)))
+                self._send(200, {"clip": clip.review_payload() if clip else None})
+                return
+            if path == "/release":
+                store.release_claim(str(body["clip_id"]), str(body["reviewer_id"]))
+                self._send(200, {"released": True})
+                return
+            if path == "/label":
+                allowed = {"clip_id", "reviewer_id", "label", "labels", "severity", "region_start", "region_end", "affected_tokens", "comment", "confidence", "needs_context"}
+                unknown = set(body) - allowed
+                if unknown:
+                    raise ValueError(f"unknown label fields: {sorted(unknown)}")
+                value = dict(body)
+                value["affected_tokens"] = tuple(value.get("affected_tokens") or ())
+                value["labels"] = tuple(value.get("labels") or ())
+                store.save_label(HumanLabel(**value))
+                self._send(200, {"saved": True})
+                return
+            if path == "/adjudicate":
+                store.adjudicate(str(body["clip_id"]), str(body["adjudicator_id"]), body.get("consensus_labels") or (), comment=str(body.get("comment", "")))
+                self._send(200, {"adjudicated": True})
+                return
+            raise ValueError("unknown endpoint")
 
         def log_message(self, *_):
             pass
 
-    try:
-        ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
-    finally:
-        store.close()
+    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
     return 0
 
 

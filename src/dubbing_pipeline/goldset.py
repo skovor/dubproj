@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
+from functools import wraps
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -23,6 +25,14 @@ LABELS = (
 )
 SPLITS = ("calibration", "validation", "hidden_test")
 _REVIEW_FIELDS = {"clip_id", "scene_id", "line_id", "candidate_id", "speaker_id", "expected_text", "source_text", "performance_mode", "audio_path", "context_path", "source_reference_path"}
+
+
+def _db_locked(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return guarded
 
 
 def _text(value: Any) -> str:
@@ -119,7 +129,8 @@ class GoldsetStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(str(self.path))
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30.0)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -167,10 +178,21 @@ class GoldsetStore:
         self._db.execute("INSERT INTO claims(clip_id, reviewer_id, claimed_at, lease_expires_at) SELECT clip_id, reviewer_id, claimed_at, ? FROM claims_legacy", (expired,))
         self._db.execute("DROP TABLE claims_legacy")
 
+    @_db_locked
     def close(self) -> None:
         self._db.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.close()
+        return False
+
+    @_db_locked
     def add_clip(self, clip: ClipRecord) -> None:
+        if clip.split == "hidden_test" and self.hidden_seal() is not None:
+            raise ValueError("hidden test membership is sealed")
         payload = canonical_json(clip.to_dict())
         try:
             self._db.execute("INSERT INTO clips VALUES (?, ?, ?, ?, ?)", (clip.clip_id, payload, clip.split_group, clip.split, clip.audio_sha256))
@@ -180,10 +202,12 @@ class GoldsetStore:
                 raise ValueError(f"clip_id already exists with different immutable content: {clip.clip_id}")
         self._db.commit()
 
+    @_db_locked
     def add_clips(self, clips: Iterable[ClipRecord]) -> None:
         for clip in clips:
             self.add_clip(clip)
 
+    @_db_locked
     def claim(self, reviewer_id: str, *, split: str | None = None, lease_seconds: int = 900) -> ClipRecord | None:
         from datetime import datetime, timedelta, timezone
         reviewer_id = _text(reviewer_id)
@@ -206,26 +230,36 @@ class GoldsetStore:
         self._db.execute("INSERT OR REPLACE INTO claims VALUES (?, ?, ?, ?)", (row["clip_id"], reviewer_id, now_text, expires_text)); self._db.commit()
         return ClipRecord(**json.loads(row["payload"]))
 
+    @_db_locked
     def release_claim(self, clip_id: str, reviewer_id: str) -> None:
         self._db.execute("DELETE FROM claims WHERE clip_id=? AND reviewer_id=?", (clip_id, reviewer_id)); self._db.commit()
 
+    @_db_locked
     def save_label(self, label: HumanLabel) -> None:
-        if self._db.execute("SELECT 1 FROM clips WHERE clip_id=?", (label.clip_id,)).fetchone() is None:
+        clip_row = self._db.execute("SELECT split FROM clips WHERE clip_id=?", (label.clip_id,)).fetchone()
+        if clip_row is None:
             raise ValueError(f"unknown clip: {label.clip_id}")
+        if clip_row["split"] == "hidden_test" and self.hidden_seal() is not None:
+            raise ValueError("hidden test labels are sealed")
         self._db.execute("INSERT OR REPLACE INTO labels VALUES (?, ?, ?)", (label.clip_id, label.reviewer_id, canonical_json(label.to_dict())))
         self._db.execute("DELETE FROM claims WHERE clip_id=? AND reviewer_id=?", (label.clip_id, label.reviewer_id))
         self._db.commit()
 
+    @_db_locked
     def adjudicate(self, clip_id: str, adjudicator_id: str, consensus_labels: Sequence[str], *, comment: str = "") -> None:
         selected = tuple(dict.fromkeys(str(item).strip() for item in consensus_labels if str(item).strip()))
         if not selected or any(item not in LABELS for item in selected):
             raise ValueError("adjudication requires valid consensus labels")
-        if self._db.execute("SELECT 1 FROM clips WHERE clip_id=?", (clip_id,)).fetchone() is None:
+        clip_row = self._db.execute("SELECT split FROM clips WHERE clip_id=?", (clip_id,)).fetchone()
+        if clip_row is None:
             raise ValueError(f"unknown clip: {clip_id}")
+        if clip_row["split"] == "hidden_test" and self.hidden_seal() is not None:
+            raise ValueError("hidden test adjudication is sealed")
         from datetime import datetime, timezone
         self._db.execute("INSERT OR REPLACE INTO adjudications VALUES (?, ?, ?, ?, ?)", (clip_id, adjudicator_id, canonical_json(list(selected)), comment, datetime.now(timezone.utc).isoformat()))
         self._db.commit()
 
+    @_db_locked
     def seal_hidden_test(self, operator_id: str) -> dict[str, Any]:
         """Seal hidden membership once; the seal is content-addressed."""
         from datetime import datetime, timezone
@@ -234,7 +268,7 @@ class GoldsetStore:
             raise ValueError("operator_id is required")
         if self._db.execute("SELECT 1 FROM hidden_seal LIMIT 1").fetchone() is not None:
             raise ValueError("hidden test is already sealed")
-        rows = [{"clip_id": row["clip_id"], "payload": json.loads(row["payload"]), "audio_sha256": row["audio_sha256"]} for row in self._db.execute("SELECT clip_id, payload, audio_sha256 FROM clips WHERE split='hidden_test' ORDER BY clip_id")]
+        rows = self._hidden_seal_payload()
         if not rows:
             raise ValueError("cannot seal an empty hidden test")
         digest = sha256_bytes(canonical_json(rows))
@@ -242,10 +276,12 @@ class GoldsetStore:
         self._db.execute("INSERT INTO hidden_seal VALUES (?, ?, ?, ?, NULL)", (f"hidden-{digest[:16]}", operator_id, digest, created_at)); self._db.commit()
         return self.hidden_seal() or {}
 
+    @_db_locked
     def hidden_seal(self) -> dict[str, Any] | None:
         row = self._db.execute("SELECT seal_id, operator_id, digest, created_at, opened_at FROM hidden_seal LIMIT 1").fetchone()
         return dict(row) if row is not None else None
 
+    @_db_locked
     def mark_hidden_opened(self, operator_id: str) -> dict[str, Any]:
         """Record the one-shot hidden-set access used for final evaluation."""
         seal = self.hidden_seal()
@@ -253,13 +289,17 @@ class GoldsetStore:
             raise ValueError("hidden test is not sealed")
         if seal.get("opened_at"):
             raise ValueError("hidden test has already been opened")
+        if _text(operator_id) != str(seal.get("operator_id", "")):
+            raise ValueError("only the sealing operator may open the hidden test")
         from datetime import datetime, timezone
         self._db.execute("UPDATE hidden_seal SET opened_at=? WHERE seal_id=?", (datetime.now(timezone.utc).isoformat(), seal["seal_id"])); self._db.commit()
         return self.hidden_seal() or {}
 
+    @_db_locked
     def clips(self) -> list[ClipRecord]:
         return [ClipRecord(**json.loads(row["payload"])) for row in self._db.execute("SELECT payload FROM clips ORDER BY clip_id")]
 
+    @_db_locked
     def labels(self) -> list[HumanLabel]:
         result = []
         adjudicated = {row["clip_id"]: row["adjudicator_id"] for row in self._db.execute("SELECT clip_id, adjudicator_id FROM adjudications")}
@@ -269,6 +309,7 @@ class GoldsetStore:
             result.append(HumanLabel(**value))
         return result
 
+    @_db_locked
     def effective_labels(self) -> list[HumanLabel]:
         """Return one authoritative label per clip for calibration.
 
@@ -295,6 +336,19 @@ class GoldsetStore:
                 result.extend(by_clip[clip_id])
         return result
 
+    def _hidden_seal_payload(self) -> list[dict[str, Any]]:
+        """Return hidden membership plus current effective label evidence."""
+        hidden_ids = {str(row["clip_id"]) for row in self._db.execute("SELECT clip_id FROM clips WHERE split='hidden_test'")}
+        labels = [label.to_dict() for label in self.effective_labels() if label.clip_id in hidden_ids]
+        rows = [{"clip_id": row["clip_id"], "payload": json.loads(row["payload"]), "audio_sha256": row["audio_sha256"], "split": row["split"], "split_group": row["split_group"]} for row in self._db.execute("SELECT clip_id, payload, audio_sha256, split, split_group FROM clips WHERE split='hidden_test' ORDER BY clip_id")]
+        return [{"clip": row, "effective_labels": [label for label in labels if label.get("clip_id") == row["clip_id"]]} for row in rows]
+
+    @_db_locked
+    def verify_hidden_seal(self) -> bool:
+        seal = self.hidden_seal()
+        return bool(seal and sha256_bytes(canonical_json(self._hidden_seal_payload())) == str(seal["digest"]).casefold())
+
+    @_db_locked
     def export(self, directory: str | Path, *, include_hidden: bool = False) -> dict[str, str]:
         root = Path(directory); root.mkdir(parents=True, exist_ok=True)
         clips = self.clips(); labels = self.labels(); effective = self.effective_labels()
