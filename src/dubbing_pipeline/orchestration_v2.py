@@ -124,6 +124,8 @@ def _calibration_kwargs(config: Any, alignment_backend: Any, *, performance_mode
         "backend_id": str(getattr(alignment_backend, "backend_id", "unknown")) if alignment_backend is not None else None,
         "runtime_lock_sha256": sha256_file(runtime_lock) if runtime_lock is not None and Path(runtime_lock).is_file() else None,
         "models_lock_sha256": sha256_file(models_lock) if models_lock is not None and Path(models_lock).is_file() else None,
+        "expected_code_commit": getattr(config.qa, "expected_calibration_code_commit", None),
+        "require_promotion_receipt": bool(getattr(config.qa, "require_promotion_receipt", False) or not getattr(config, "lab_mode", True)),
         "model_id": str(getattr(alignment_backend, "model_id", "unknown")) if alignment_backend is not None else None,
         "model_revision": str(getattr(alignment_backend, "model_revision", "unknown")) if alignment_backend is not None else None,
         "performance_mode": str(performance_mode or getattr(config.qa, "performance_mode", "NEUTRAL")),

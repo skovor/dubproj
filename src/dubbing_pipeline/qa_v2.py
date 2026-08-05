@@ -12,6 +12,7 @@ from typing import Any, Literal, Mapping, Sequence
 from .audio import clipping, peak_dbfs, read
 from .contracts import FailureClass, GateEvidence, GateStatus, gate_passes
 from .hashing import canonical_json, sha256_bytes, sha256_file
+from .calibration.receipt import promotion_profile_payload, promotion_profile_payload_sha256
 from .timing import speech_end
 
 _TOKEN = re.compile(r"[^\W\d_]+", re.UNICODE)
@@ -716,8 +717,12 @@ def calibration_profile_status(
     if not metric_keys.issubset(metrics):
         return "BLOCKED_INCOMPLETE_PROFILE"
     try:
-        if any(float(metrics[key]) < 0.0 for key in ("hidden_false_pass_count", "hidden_false_fail_count", "brier_score", "expected_calibration_error")):
-            return "BLOCKED_INCOMPLETE_PROFILE"
+        if any(float(metrics[key]) < 0.0 or float(metrics[key]) > 1.0 for key in ("brier_score", "expected_calibration_error")):
+            return "BLOCKED_INVALID_METRICS"
+        if any(int(metrics[key]) != float(metrics[key]) or int(metrics[key]) < 0 for key in ("hidden_false_pass_count", "hidden_false_fail_count")):
+            return "BLOCKED_INVALID_METRICS"
+        if int(metrics["hidden_false_pass_count"]) != 0:
+            return "BLOCKED_HIDDEN_FALSE_PASS"
     except (TypeError, ValueError):
         return "BLOCKED_INCOMPLETE_PROFILE"
     provenance_keys = {"code_commit", "runtime_lock_sha256", "models_lock_sha256", "created_at"}
@@ -752,6 +757,13 @@ def calibration_profile_status(
         except (OSError, UnicodeDecodeError, ValueError):
             return "BLOCKED_PROMOTION_RECEIPT"
         if not isinstance(receipt, Mapping) or receipt.get("schema") != "dubproj-promotion-receipt-v1" or str(receipt.get("profile_id", "")) != str(profile.get("profile_id", "")) or str(receipt.get("code_commit", "")).casefold() != str(provenance.get("code_commit", "")).casefold():
+            return "BLOCKED_PROMOTION_RECEIPT"
+        receipt_payload = receipt.get("profile_payload")
+        receipt_payload_sha = receipt.get("promoted_profile_payload_sha256")
+        if not isinstance(receipt_payload, Mapping) or not isinstance(receipt_payload_sha, str):
+            return "BLOCKED_PROMOTION_RECEIPT"
+        current_payload = promotion_profile_payload(profile)
+        if dict(receipt_payload) != current_payload or receipt_payload_sha.casefold() != promotion_profile_payload_sha256(profile).casefold():
             return "BLOCKED_PROMOTION_RECEIPT"
         receipt_artifacts = receipt.get("artifact_sha256")
         if not isinstance(receipt_artifacts, Mapping) or any(str(receipt_artifacts.get(role, "")).casefold() != str(calibrators[role].get("artifact_sha256", "")).casefold() for role in ("target", "final_anchor", "lid")):
@@ -841,6 +853,8 @@ def apply_independent_evidence(
     model_id: str | None = None,
     model_revision: str | None = None,
     performance_mode: str | None = None,
+    expected_code_commit: str | None = None,
+    require_promotion_receipt: bool = False,
 ) -> LinguisticDecision:
     """Promote a screen only after a genuinely different evidence family.
 
@@ -862,6 +876,8 @@ def apply_independent_evidence(
         calibrator_root=calibration_profile_root,
         runtime_lock_sha256=runtime_lock_sha256,
         models_lock_sha256=models_lock_sha256,
+        expected_code_commit=expected_code_commit,
+        require_promotion_receipt=require_promotion_receipt,
     )
     calibrated = profile_status == "MATCHED_VALIDATED"
     if calibration_authority and not calibrated and not alignment_evidence:
@@ -1191,10 +1207,12 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           backend_id: str | None = None,
                           runtime_lock_sha256: str | None = None,
                           models_lock_sha256: str | None = None,
-                          model_id: str | None = None,
-                          model_revision: str | None = None,
-                          performance_mode: str | None = None,
-                          performance_max_duration_error_ms: float | None = None) -> QAResultV2:
+                           model_id: str | None = None,
+                           model_revision: str | None = None,
+                           performance_mode: str | None = None,
+                           expected_code_commit: str | None = None,
+                           require_promotion_receipt: bool = False,
+                           performance_max_duration_error_ms: float | None = None) -> QAResultV2:
     profile = profile or LanguageProfile()
     gates: dict[str, GateEvidence] = {}
     diagnostics: dict[str, Any] = {}
@@ -1276,10 +1294,12 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                 backend_id=backend_id,
                 runtime_lock_sha256=runtime_lock_sha256,
                 models_lock_sha256=models_lock_sha256,
-                model_id=model_id,
-                model_revision=model_revision,
-                performance_mode=performance_mode,
-            )
+                 model_id=model_id,
+                 model_revision=model_revision,
+                 performance_mode=performance_mode,
+                 expected_code_commit=expected_code_commit,
+                 require_promotion_receipt=require_promotion_receipt,
+             )
         forced_text = lexical_decision.forced_transcript or ""
         automatic_text = lexical_decision.automatic_transcript or ""
         forced_content_ok, forced_content_details = ordered_content(expected_text, forced_text)

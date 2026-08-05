@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from .train import CalibrationArtifact
 from .validate import ValidationReport, evaluate
+from .receipt import promotion_profile_payload, promotion_profile_payload_sha256
 
 class PromotionError(ValueError): pass
 
@@ -164,6 +165,15 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
         "metrics": {"hidden_false_pass_count": hidden.false_pass_count, "hidden_false_fail_count": hidden.false_fail_count, "brier_score": hidden.brier_score, "expected_calibration_error": hidden.expected_calibration_error, "validation": validation.to_dict(), "validation_predictions_sha256": _prediction_digest(validation), "hidden_predictions_sha256": _prediction_digest(hidden), "reports": reports, "recomputed": True},
         "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id, "promotion_receipt_path": str(receipt_path), "promotion_receipt_sha256": receipt_sha},
     }
+    profile_payload = promotion_profile_payload(profile)
+    profile_payload_sha = promotion_profile_payload_sha256(profile)
+    receipt_payload["profile_payload"] = profile_payload
+    receipt_payload["promoted_profile_payload_sha256"] = profile_payload_sha
+    receipt_bytes = (json.dumps(receipt_payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+    profile["provenance"]["promotion_receipt_sha256"] = receipt_sha
+    profile["provenance"]["promoted_profile_payload_sha256"] = profile_payload_sha
     destination.write_text(json.dumps(profile, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); return profile
 
 __all__ = ["PromotionError", "promote_profile"]

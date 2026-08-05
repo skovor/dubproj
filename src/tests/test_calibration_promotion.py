@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, tempfile, unittest
+import copy, hashlib, json, tempfile, unittest
 from pathlib import Path
 from dubbing_pipeline.calibration import TARGET_FEATURES, FINAL_ANCHOR_FEATURES, FeatureRow, train_calibrator
 from dubbing_pipeline.calibration.lid_features import LID_FEATURES, LIDFeatureRow
@@ -42,6 +42,11 @@ class PromotionTests(unittest.TestCase):
             self.assertEqual(set(profile["metrics"]["reports"]), {"target", "final_anchor", "lid"})
             self.assertTrue(profile["provenance"]["promotion_receipt_sha256"])
             self.assertEqual(calibration_profile_status(profile, authority=True, backend_id="b", model_id="m", model_revision="r", target_language="de", source_language="en", performance_mode="NEUTRAL", runtime_lock_sha256="1" * 64, models_lock_sha256="2" * 64, expected_code_commit="a" * 40), "MATCHED_VALIDATED")
+            self.assertEqual(calibration_profile_status(profile, authority=True, backend_id="b", model_id="m", model_revision="r", target_language="de", source_language="en", performance_mode="NEUTRAL", runtime_lock_sha256="1" * 64, models_lock_sha256="2" * 64, expected_code_commit="a" * 40, require_promotion_receipt=True), "MATCHED_VALIDATED")
+            for section, key, value in (("thresholds", "target_pass_probability", .81), ("identity", "model_revision", "mutated"), ("metrics", "brier_score", .1), ("dataset", "manifest_sha256", "3" * 64)):
+                mutated = copy.deepcopy(profile)
+                mutated[section][key] = value
+                self.assertNotEqual(calibration_profile_status(mutated, authority=True, backend_id="b", model_id="m", model_revision="r", target_language="de", source_language="en", performance_mode="NEUTRAL", runtime_lock_sha256="1" * 64, models_lock_sha256="2" * 64, expected_code_commit="a" * 40, require_promotion_receipt=True), "MATCHED_VALIDATED", (section, key))
             Path(profile["provenance"]["promotion_receipt_path"]).write_text("tampered", encoding="utf-8")
             self.assertEqual(calibration_profile_status(profile, authority=True, backend_id="b", model_id="m", model_revision="r", target_language="de", source_language="en", performance_mode="NEUTRAL", runtime_lock_sha256="1" * 64, models_lock_sha256="2" * 64), "BLOCKED_PROMOTION_RECEIPT")
 
