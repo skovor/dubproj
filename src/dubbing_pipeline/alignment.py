@@ -680,37 +680,21 @@ class MFAAlignerAdapter:
             raise AlignmentUnavailable(f"MFA executable is not available: {self.executable}")
         if self.dictionary_path is None or self.acoustic_model_path is None:
             raise AlignmentUnavailable("MFA align_one requires dictionary_path and acoustic_model_path")
-        if not self.dictionary_path.is_file() or not self.acoustic_model_path.exists():
-            raise AlignmentUnavailable("MFA dictionary/acoustic model path does not exist")
-        audio_path = Path(path)
-        if not audio_path.is_file():
-            raise AlignmentUnavailable(f"MFA input audio does not exist: {audio_path}")
-        with tempfile.TemporaryDirectory(prefix="mfa-align-one-") as directory:
-            root = Path(directory)
-            text_path = root / "transcript.txt"
-            output_path = root / "alignment.json"
-            text_path.write_text(text.strip() + "\n", encoding="utf-8")
-            command = [
-                str(self.executable), "align_one", "--output_format", "json",
-                str(audio_path), str(text_path), str(self.dictionary_path),
-                str(self.acoustic_model_path), str(output_path),
-            ]
-            try:
-                completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=self.timeout_seconds)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise AlignmentUnavailable(f"MFA align_one failed to start or timed out: {exc}") from exc
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "MFA returned a non-zero status").strip()
-                raise AlignmentUnavailable(f"MFA align_one failed ({completed.returncode}): {detail[-1000:]}")
-            candidates = [output_path]
-            candidates.extend(root.glob("*.json"))
-            result_path = next((item for item in candidates if item.is_file()), None)
-            if result_path is None:
-                raise AlignmentUnavailable("MFA align_one did not produce a JSON alignment")
-            try:
-                raw = json.loads(result_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise AlignmentUnavailable(f"MFA alignment JSON is invalid: {exc}") from exc
+        from .mfa_adapter import MFAAssets, align_diagnostic, probe_mfa
+        try:
+            capability = probe_mfa(str(self.executable), timeout_seconds=min(10.0, self.timeout_seconds))
+            with tempfile.TemporaryDirectory(prefix="mfa-align-one-") as directory:
+                result = align_diagnostic(capability, MFAAssets(self.acoustic_model_path, self.dictionary_path, language=language), path, text, directory, timeout_seconds=self.timeout_seconds)
+                if result.status != "MFA_DIAGNOSTIC" or not result.textgrid_path:
+                    raise AlignmentUnavailable(result.reason or result.status)
+                result_path = Path(result.textgrid_path)
+                raw = json.loads(result_path.read_text(encoding="utf-8")) if result_path.suffix.lower() == ".json" else None
+                diagnostic_coverage = result.coverage
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise AlignmentUnavailable(f"MFA diagnostic failed: {exc}") from exc
+        if raw is None:
+            coverage = float(diagnostic_coverage or 0.0)
+            return {"score": coverage, "coverage": coverage, "final_anchor_present": coverage >= 0.999, "words": []}
         words = _extract_mfa_words(raw)
         expected = max(1, len(text.split()))
         covered = sum(1 for item in words if item.get("start") is not None and item.get("end") is not None)

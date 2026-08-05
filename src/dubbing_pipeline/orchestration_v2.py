@@ -304,6 +304,8 @@ def _stage_bundle(option: dict[str, Any]) -> dict[str, Any]:
         "alignment": option.get("alignment"),
         "lid": option.get("lid"),
         "lid_fusion": option.get("lid_fusion"),
+        "mfa": option.get("mfa"),
+        "mfa_status": option.get("mfa_status"),
         "qa_route": option.get("qa_route"),
         "alignment_status": option.get("alignment_status"),
         "error": option.get("error"),
@@ -316,7 +318,7 @@ def _aggregate_line_scene_audit(rows: list[dict[str, Any]]) -> StageAudit:
     return StageAudit(stage="SCENE_QA", passed=passed, qa_hash=qa_hash, diagnostics={"topology": "LINE_SEPARATED", "line_count": len(rows)})
 
 
-def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None, repair_executor: Any = None) -> dict[str, Any]:
+def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, mfa_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None, repair_executor: Any = None) -> dict[str, Any]:
     """Run one scene and select only candidates that survive delivery QA.
 
     Raw QA is deliberately a filter, not the final decision.  Every surviving
@@ -337,6 +339,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             assert_backend_matches_lock(alignment_backend, config.models_lock, role="alignment")
         if lid_backend is not None:
             assert_backend_matches_lock(lid_backend, config.models_lock, role="lid")
+        if mfa_backend is not None:
+            assert_backend_matches_lock(mfa_backend, config.models_lock, role="mfa")
     validate_scene(scene)
     if config.lab_mode:
         if config.sandbox_root is None:
@@ -350,7 +354,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     # in the run pool still makes the identity and load count observable and
     # prevents orchestration from silently constructing a second instance.
     pool.get(ModelIdentity("generation", str(getattr(runtime, "model_id", getattr(config, "model_id", "unknown"))), str(getattr(runtime, "model_revision", getattr(config, "model_revision", "unknown"))), str(getattr(config, "device", "cpu")), str(getattr(config, "dtype", "float32"))), lambda: runtime.backend)
-    for role, backend in (("asr", asr), ("alignment", alignment_backend), ("lid", lid_backend)):
+    for role, backend in (("asr", asr), ("alignment", alignment_backend), ("lid", lid_backend), ("mfa", mfa_backend)):
         if backend is not None:
             pool.get(ModelIdentity(role, str(getattr(backend, "model_id", "unknown")), str(getattr(backend, "model_revision", "unknown")), str(getattr(config, "device", "cpu")), str(getattr(config, "dtype", "float32"))), lambda backend=backend: backend)
     run_state = state_store or StateStore(out / "state", f"{scene.id}-{contract_hash('run', {'scene': scene.id, 'config': config.to_dict()})[:16]}")
@@ -438,6 +442,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         "qa_routes": {},
         "model_pool": {},
         "repair_attempts": [],
+        "mfa": {"available": mfa_backend is not None, "requested": 0, "executed": 0},
     }
     stage_counts = {name: 0 for name in ("RAW_TECHNICAL_QA", "PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "LINGUISTIC_ALIGNMENT", "SCENE_QA")}
     alignment_count = 0
@@ -717,9 +722,11 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 provisional_status=provisional_status,
                 candidate_count=len(provisional),
                 lid_available=lid_backend is not None,
-                mfa_requested=bool((getattr(line, "metadata", {}) or {}).get("mfa_requested", False)),
+                mfa_requested=bool(mfa_backend is not None and (getattr(line, "metadata", {}) or {}).get("mfa_requested", False)),
             )
             option["qa_route"] = qa_route
+            if 4 in qa_route:
+                report["mfa"]["requested"] += 1
             report["qa_routes"].setdefault(line.id, []).append({"candidate_id": option["candidate"].candidate_id, "levels": list(qa_route), "performance_mode": performance.mode.value})
             if 2 not in qa_route:
                 option["alignment_status"] = "TECHNICAL_ONLY_HOLD"
@@ -831,6 +838,14 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                     )
                 option["eligible"] = bool(regraded.passed and option["serialized_audit"].passed)
+                if mfa_backend is not None and 4 in qa_route and not option["eligible"]:
+                    try:
+                        option["mfa"] = mfa_backend.align(mounted_audit.artifact_path or "", text=line.effective_target_text, language=config.target_language)
+                        option["mfa_status"] = "EXECUTED_DIAGNOSTIC"
+                        report["mfa"]["executed"] += 1
+                    except Exception as exc:
+                        option["mfa_status"] = "MFA_UNAVAILABLE"
+                        option["mfa_error"] = str(exc)
                 if option["eligible"]:
                     break
             except AlignmentUnavailable as exc:

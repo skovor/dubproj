@@ -840,6 +840,27 @@ class V2SchedulerTests(unittest.TestCase):
             self.assertTrue(report["model_pool"]["loaded"])
             self.assertTrue((root / "out" / "S" / "state").exists())
 
+    def test_mfa_is_invoked_only_when_cost_route_requests_it(self):
+        import soundfile as sf
+        class Backend:
+            def generate_batch(self, payload):
+                audio = np.zeros(2400, dtype="float32"); audio[100:1100] = .05
+                return [audio for _ in payload]
+        class ASR:
+            def transcribe(self, _path): return {"text": "Hallo", "language": "de", "probability": .99}
+        class LowCTC(self.FakeCTC):
+            def align(self, _path, *, text, language): return {"score": .10, "coverage": 0.2, "final_anchor_present": False}
+        class MFA:
+            def __init__(self): self.calls=0
+            def align(self, _path, *, text, language): self.calls += 1; return {"score": .2, "coverage": .2, "final_anchor_present": False, "words": []}
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); ref=root/"ref.wav"; sf.write(ref, np.ones(2400,dtype="float32")*.04,24000)
+            qa, runtime_lock, models_lock=self._calibrated_qa(root)
+            config=PipelineConfig(project_root=root, output_root=root/"out", cache_root=root/"cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root/"sandbox", initial_takes=1, retry_takes=0, qa=qa, runtime_lock=runtime_lock, models_lock=models_lock)
+            line=Line("L1","A","Hello","Hallo",0,1,topology="LINE_SEPARATED",subtitle_authorized=True,reference_audio=str(ref),metadata={"mfa_requested":True})
+            mfa=MFA(); report=run_scene_v2(Scene("S","LINE_SEPARATED",[line]),config,runtime=GenerationRuntimeV2(Backend(),backend_version="test"),asr=ASR(),alignment_backend=LowCTC(),mfa_backend=mfa)
+            self.assertGreater(mfa.calls,0); self.assertGreater(report["mfa"]["executed"],0)
+
     def test_final_selection_happens_after_processed_and_mounted_qa(self):
         import soundfile as sf
 
