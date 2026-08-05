@@ -14,7 +14,7 @@ from .audio import read
 from .alignment import AlignmentCache, AlignmentUnavailable, contrastive_align, language_id_evidence
 from .lid import LIDPolicy, independent_lid, fuse_language_evidence
 from .asr import ASRCache, DualASREvidence, prepare_whisperx_escalation, transcribe_dual
-from .contracts import DeliveryWindow, FailureClass
+from .contracts import DeliveryWindow, FailureClass, RunState
 from .contracts.manifest import validate_scene_value
 from .generation_v2 import GenerationRuntimeV2, generate_cohort_v2
 from .hashing import atomic_json, contract_hash, sha256_bytes, sha256_file
@@ -29,8 +29,13 @@ from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2, is_provis
 from .reference import materialize_reference
 from .runtime_lock import assert_backend_matches_lock, assert_reproducible
 from .scheduler import run_cohorts
+from .scheduler import route_qa
 from .fmv_selector import select_local_scene
 from .scene_qa import build_candidate_matrix
+from .performance import PerformanceEvidence, classify_performance
+from .performance_policy import policy_for
+from .model_pool import ModelIdentity, ModelPool
+from .state import StateStore
 
 
 def _line_window(line: Line, sample_rate: int, scene_id: str, channel: int) -> DeliveryWindow:
@@ -104,7 +109,7 @@ def _profile(config: Any, supplied: LanguageProfile | None) -> LanguageProfile:
     )
 
 
-def _calibration_kwargs(config: Any, alignment_backend: Any) -> dict[str, Any]:
+def _calibration_kwargs(config: Any, alignment_backend: Any, *, performance_mode: str | None = None) -> dict[str, Any]:
     """Bind QA authority to the exact active alignment runtime identity."""
     runtime_lock = getattr(config, "runtime_lock", None)
     models_lock = getattr(config, "models_lock", None)
@@ -118,8 +123,36 @@ def _calibration_kwargs(config: Any, alignment_backend: Any) -> dict[str, Any]:
         "models_lock_sha256": sha256_file(models_lock) if models_lock is not None and Path(models_lock).is_file() else None,
         "model_id": str(getattr(alignment_backend, "model_id", "unknown")) if alignment_backend is not None else None,
         "model_revision": str(getattr(alignment_backend, "model_revision", "unknown")) if alignment_backend is not None else None,
-        "performance_mode": str(getattr(config.qa, "performance_mode", "NEUTRAL")),
+        "performance_mode": str(performance_mode or getattr(config.qa, "performance_mode", "NEUTRAL")),
     }
+
+
+def _line_performance(line: Line, config: Any) -> PerformanceEvidence:
+    """Resolve performance independently for every line.
+
+    Explicit metadata is authoritative for routing; duration is only a
+    diagnostic fallback and never changes lexical content.  Keeping this
+    decision line-local prevents a scene-level mode from leaking into a
+    different speaker or delivery.
+    """
+    metadata = dict(getattr(line, "metadata", {}) or {})
+    if not metadata.get("performance_mode") and getattr(config.qa, "performance_mode", None):
+        metadata["performance_mode"] = getattr(config.qa, "performance_mode")
+    duration = max(0.0, float(line.end) - float(line.start)) if line.end > line.start else None
+    return classify_performance(metadata=metadata, duration_seconds=duration)
+
+
+def _line_hard_gates(config: Any, performance: PerformanceEvidence) -> list[str]:
+    """Apply only the mode-specific hard gates while retaining diagnostics."""
+    gates = list(getattr(config.qa, "hard_gates", ()) or ())
+    policy = policy_for(performance.mode)
+    if not policy.require_content:
+        gates = [gate for gate in gates if gate != "content"]
+    if not policy.require_final_word:
+        gates = [gate for gate in gates if gate != "final_word"]
+    if not policy.require_loudness:
+        gates = [gate for gate in gates if gate != "active_loudness"]
+    return gates
 
 
 def _result_or_failed(audit: StageAudit) -> QAResultV2:
@@ -268,6 +301,7 @@ def _stage_bundle(option: dict[str, Any]) -> dict[str, Any]:
         "alignment": option.get("alignment"),
         "lid": option.get("lid"),
         "lid_fusion": option.get("lid_fusion"),
+        "qa_route": option.get("qa_route"),
         "alignment_status": option.get("alignment_status"),
         "error": option.get("error"),
     }
@@ -279,7 +313,7 @@ def _aggregate_line_scene_audit(rows: list[dict[str, Any]]) -> StageAudit:
     return StageAudit(stage="SCENE_QA", passed=passed, qa_hash=qa_hash, diagnostics={"topology": "LINE_SEPARATED", "line_count": len(rows)})
 
 
-def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None) -> dict[str, Any]:
+def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None) -> dict[str, Any]:
     """Run one scene and select only candidates that survive delivery QA.
 
     Raw QA is deliberately a filter, not the final decision.  Every surviving
@@ -307,9 +341,21 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         SandboxLayout.create(config.sandbox_root).ensure_safe()
     out = Path(output_dir or config.output_root) / scene.id
     out.mkdir(parents=True, exist_ok=True)
+    owned_pool = model_pool is None
+    pool = model_pool or ModelPool()
+    # The generation runtime owns the already-loaded model.  Registering it
+    # in the run pool still makes the identity and load count observable and
+    # prevents orchestration from silently constructing a second instance.
+    pool.get(ModelIdentity("generation", str(getattr(runtime, "model_id", getattr(config, "model_id", "unknown"))), str(getattr(runtime, "model_revision", getattr(config, "model_revision", "unknown"))), str(getattr(config, "device", "cpu")), str(getattr(config, "dtype", "float32"))), lambda: runtime.backend)
+    for role, backend in (("asr", asr), ("alignment", alignment_backend), ("lid", lid_backend)):
+        if backend is not None:
+            pool.get(ModelIdentity(role, str(getattr(backend, "model_id", "unknown")), str(getattr(backend, "model_revision", "unknown")), str(getattr(config, "device", "cpu")), str(getattr(config, "dtype", "float32"))), lambda backend=backend: backend)
+    run_state = state_store or StateStore(out / "state", f"{scene.id}-{contract_hash('run', {'scene': scene.id, 'config': config.to_dict()})[:16]}")
+    run_state.commit(RunState(scene.id, "PREFLIGHT"), {"event": "scene_started", "scene_id": scene.id})
     profile = _profile(config, language_profile)
     refs: dict[str, Any] = {}
     lines = [line for line in scene.lines if classify_line(line, append_ellipsis_experiment=config.append_ellipsis_experiment).policy not in {KEEP_ORIGINAL, BLOCKED}]
+    performance_by_line = {line.id: _line_performance(line, config) for line in scene.lines}
     for line in lines:
         refs[line.id] = materialize_reference(line, config.project_root, config.cache_root, language=config.source_language)
 
@@ -337,6 +383,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
 
     def evaluate(candidate):
         line = line_by_id[candidate.line_id]
+        performance = performance_by_line[line.id]
         evidence = _transcribe_evidence(
             asr,
             candidate.raw_audio,
@@ -363,7 +410,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             language=language,
             language_probability=probability,
             profile=profile,
-            hard_gates=list(config.qa.hard_gates),
+            hard_gates=_line_hard_gates(config, performance),
             final_word_min_tokens=config.qa.final_word_min_tokens,
             tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
             require_asr=True,
@@ -383,6 +430,9 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         "raw_retry_ids": list(cohort.retry_ids),
         "phases": list(cohort.phases),
         "stage_evidence": {},
+        "performance_by_line": {line_id: evidence.to_dict() for line_id, evidence in performance_by_line.items()},
+        "qa_routes": {},
+        "model_pool": {},
     }
     stage_counts = {name: 0 for name in ("RAW_TECHNICAL_QA", "PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "LINGUISTIC_ALIGNMENT", "SCENE_QA")}
     alignment_count = 0
@@ -403,7 +453,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     row_by_id: dict[str, dict[str, Any]] = {}
     for line in scene.lines:
         decision = classify_line(line, append_ellipsis_experiment=config.append_ellipsis_experiment)
-        row: dict[str, Any] = {"id": line.id, "policy": decision.policy, "policy_reason": decision.reason, "stages": {}}
+        performance = performance_by_line[line.id]
+        row: dict[str, Any] = {"id": line.id, "policy": decision.policy, "policy_reason": decision.reason, "performance": performance.to_dict(), "stages": {}}
         row_by_id[line.id] = row
         if decision.policy in {KEEP_ORIGINAL, BLOCKED}:
             row["status"] = decision.policy
@@ -463,7 +514,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     language=processed_language,
                     language_probability=processed_probability,
                     profile=profile,
-                    hard_gates=list(config.qa.hard_gates),
+                    hard_gates=_line_hard_gates(config, performance),
                     final_word_min_tokens=config.qa.final_word_min_tokens,
                     tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                     require_asr=True,
@@ -502,7 +553,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         language=mounted_language,
                         language_probability=mounted_probability,
                         profile=profile,
-                        hard_gates=list(config.qa.hard_gates),
+                        hard_gates=_line_hard_gates(config, performance),
                         final_word_min_tokens=config.qa.final_word_min_tokens,
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         preserved_ok=mount_metrics.preserved_hash_before == mount_metrics.preserved_hash_after,
@@ -548,7 +599,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         language=mounted_language,
                         language_probability=mounted_probability,
                         profile=profile,
-                        hard_gates=list(config.qa.hard_gates),
+                        hard_gates=_line_hard_gates(config, performance),
                         final_word_min_tokens=config.qa.final_word_min_tokens,
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
@@ -581,7 +632,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         language=serialized_language,
                         language_probability=serialized_probability,
                         profile=profile,
-                        hard_gates=list(config.qa.hard_gates),
+                        hard_gates=_line_hard_gates(config, performance),
                         final_word_min_tokens=config.qa.final_word_min_tokens,
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
@@ -622,6 +673,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         row = row_by_id.get(line.id)
         if row is None or not options:
             continue
+        performance = performance_by_line[line.id]
         provisional = [option for option in options if _audit_can_escalate(option.get("mounted_audit"))]
         provisional.sort(key=lambda option: rank_provisional_v2(option["mounted_audit"].result), reverse=True)
         for option in provisional:
@@ -629,6 +681,19 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         for option in provisional:
             option["alignment_status"] = "ALIGNMENT_PENDING"
             mounted_audit = option["mounted_audit"]
+            provisional_status = linguistic_status(mounted_audit.result) or "ASR_UNCERTAIN"
+            qa_route = route_qa(
+                technical_passed=True,
+                provisional_status=provisional_status,
+                candidate_count=len(provisional),
+                lid_available=lid_backend is not None,
+                mfa_requested=bool((getattr(line, "metadata", {}) or {}).get("mfa_requested", False)),
+            )
+            option["qa_route"] = qa_route
+            report["qa_routes"].setdefault(line.id, []).append({"candidate_id": option["candidate"].candidate_id, "levels": list(qa_route), "performance_mode": performance.mode.value})
+            if 2 not in qa_route:
+                option["alignment_status"] = "TECHNICAL_ONLY_HOLD"
+                continue
             asr_evidence = mounted_audit.diagnostics.get("asr") if mounted_audit is not None else None
             if alignment_backend is None:
                 option["alignment_status"] = "ALIGNER_NOT_APPLICABLE"
@@ -689,7 +754,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     channels=int(mounted_audio.shape[1]),
                     reference_end=len(mounted_audio) / mounted_rate,
                     profile=profile,
-                    hard_gates=list(config.qa.hard_gates),
+                    hard_gates=_line_hard_gates(config, performance),
                     final_word_min_tokens=config.qa.final_word_min_tokens,
                     tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                     preserved_ok=(mounted_audit.gates.get("preserved_intervals").measured_value if mounted_audit.gates.get("preserved_intervals") is not None else None),
@@ -700,7 +765,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     alignment_min_target_score=float(getattr(config.qa, "alignment_min_target_score", .65)),
                     alignment_min_margin=float(getattr(config.qa, "alignment_min_margin", .20)),
                     alignment_source_leak_score=float(getattr(config.qa, "alignment_source_leak_score", .75)),
-                    **_calibration_kwargs(config, alignment_backend),
+                    **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                 )
                 option["mounted_audit"] = regraded
                 option["alignment"] = alignment_dict
@@ -723,7 +788,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         channels=int(mounted_audio.shape[1]),
                         reference_end=len(mounted_audio) / mounted_rate,
                         profile=profile,
-                        hard_gates=list(config.qa.hard_gates),
+                        hard_gates=_line_hard_gates(config, performance),
                         final_word_min_tokens=config.qa.final_word_min_tokens,
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
@@ -733,7 +798,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         alignment_min_target_score=float(getattr(config.qa, "alignment_min_target_score", .65)),
                         alignment_min_margin=float(getattr(config.qa, "alignment_min_margin", .20)),
                         alignment_source_leak_score=float(getattr(config.qa, "alignment_source_leak_score", .75)),
-                        **_calibration_kwargs(config, alignment_backend),
+                        **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                     )
                 option["eligible"] = bool(regraded.passed and option["serialized_audit"].passed)
                 if option["eligible"]:
@@ -818,8 +883,15 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         if stage_counts[stage] and stage not in report["phases"]:
             report["phases"].append(stage)
     report["pass"] = bool(final_scene_audit.passed and not report["blockers"] and all(row_by_id[line.id].get("status") not in {"UNPROVEN_HOLD", BLOCKED} for line in scene.lines))
+    report["model_pool"] = {
+        "loaded": [identity.__dict__ for identity in pool.loaded()],
+        "load_counts": {str(identity.__dict__): count for identity, count in pool.load_counts().items()},
+    }
+    run_state.commit(RunState(scene.id, "FINAL", {line_id: str(row.get("status", "UNKNOWN")) for line_id, row in row_by_id.items()}, list(report["blockers"]), cursor=scene.id), {"event": "scene_finished", "scene_id": scene.id, "passed": report["pass"]})
     report["contract_hash"] = contract_hash("scene-v2", {"scene": scene.to_dict(), "config": config.to_dict(), "scene_qa": report["scene_qa"]})
     atomic_json(out / "FINAL_REPORT_V2.json", report)
+    if owned_pool:
+        pool.close()
     return report
 
 
