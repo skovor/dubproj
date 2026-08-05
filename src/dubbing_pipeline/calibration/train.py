@@ -30,7 +30,7 @@ class CalibrationArtifact:
 def train_calibrator(rows: Iterable[FeatureRow], *, kind: str, features: tuple[str, ...], dataset_sha256: str, epochs: int = 600, learning_rate: float = .08) -> CalibrationArtifact:
     rows = list(rows)
     if not rows: raise CalibrationError("no human-labelled rows supplied")
-    if any(row.split == "hidden_test" for row in rows): raise CalibrationError("hidden_test is sealed and cannot train a calibrator")
+    if any(row.split != "calibration" for row in rows): raise CalibrationError("only the calibration split may train a calibrator")
     if len({row.label for row in rows}) < 2: raise CalibrationError("both positive and negative human labels are required")
     groups = {row.split_group for row in rows}; matrix = [[float(row.features[name]) for name in features] for row in rows]; labels = [float(row.label) for row in rows]
     means = [sum(row[i] for row in matrix) / len(matrix) for i in range(len(features))]
@@ -46,7 +46,8 @@ def train_calibrator(rows: Iterable[FeatureRow], *, kind: str, features: tuple[s
         weights = [value - learning_rate * grad / count for value, grad in zip(weights, grad_w)]
     probabilities = [_sigmoid(intercept + sum(weights[i] * ((value - means[i]) / scales[i]) for i, value in enumerate(row))) for row in matrix]
     brier = sum((p - label) ** 2 for p, label in zip(probabilities, labels)) / len(labels)
-    return CalibrationArtifact(kind, features, tuple(weights), intercept, tuple(zip(means, scales)), len(rows), len(groups), {"brier_score_training": brier}, dataset_sha256)
+    artifact_schema = "final-anchor-v1" if kind == "final_anchor" else FEATURE_SCHEMA_VERSION
+    return CalibrationArtifact(kind, features, tuple(weights), intercept, tuple(zip(means, scales)), len(rows), len(groups), {"brier_score_training": brier}, dataset_sha256, feature_schema_version=artifact_schema)
 
 
 def _sigmoid(value: float) -> float:

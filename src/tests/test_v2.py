@@ -33,20 +33,30 @@ from dubbing_pipeline.reference import materialize_reference
 
 def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dict, Path, Path]:
     artifact = root / "target_calibrator.json"
+    final_artifact = root / "final_anchor_calibrator.json"
     runtime_lock = root / "runtime.lock"
     models_lock = root / "models.lock"
+    target_features = ["target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score", "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio", "characters_per_second", "words_per_second", "duration", "performance_mode"]
+    final_features = ["final_coverage", "final_minimum_score", "final_mean_score", "final_duration", "gap_to_active_speech_end_ms", "final_delete_count", "final_substitute_count", "insertions_inside_anchor", "final_interpolated"]
+    normalization = [{"mean": 0.0, "scale": 1.0} for _ in target_features]
+    final_normalization = [{"mean": 0.0, "scale": 1.0} for _ in final_features]
     artifact.write_text(json.dumps({
         "schema": "platt-calibrator-v1",
         "feature_schema_version": "char-alignment-v2",
         "normalization_version": "alignment-text-normalization-v1",
-        "features": ["target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score", "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio", "characters_per_second", "words_per_second", "duration", "performance_mode"],
+        "features": target_features,
         "coefficients": [1.2, .8, .7, .7, .4, -1.0, -1.0, -1.0, -1.0, -.3, 0.0, 0.0, 0.0, 0.0],
         "intercept": -1.1,
+        "normalization": normalization,
+    }), encoding="utf-8")
+    final_artifact.write_text(json.dumps({
+        "schema": "platt-calibrator-v1", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v1",
+        "features": final_features, "coefficients": [1.2, .8, .7, .7, -.01, -1.0, -1.0, -1.0, -1.0], "intercept": -1.1, "normalization": final_normalization,
     }), encoding="utf-8")
     runtime_lock.write_bytes(b"runtime-lock-for-test")
     models_lock.write_bytes(b"models-lock-for-test")
     profile = {
-        "schema": "generic-dubbing-alignment-calibration-profile-v1",
+        "schema": "generic-dubbing-alignment-calibration-profile-v2",
         "status": "VALIDATED",
         "authority": True,
         "profile_id": "de-neutral-whisperx-001",
@@ -65,7 +75,10 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "final_anchor_pass_probability": .65,
             "source_lid_probability": .70,
         },
-        "calibrator": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v1", "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
+        "calibrators": {
+            "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v1", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
+            "final_anchor": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v1", "feature_names": final_features, "artifact_path": str(final_artifact), "artifact_sha256": sha256_file(final_artifact)},
+        },
         "dataset": {
             "manifest_sha256": "a" * 64,
             "labels_sha256": "b" * 64,
@@ -339,7 +352,7 @@ class V2QATests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile, runtime_lock, models_lock = _validated_profile(root)
-            profile["calibrator"]["engine"] = "external-python"
+            profile["calibrators"]["target"]["engine"] = "external-python"
             base = decide_linguistic_evidence(
                 "Keine Sorge", "Don't worry", forced_target={"text": "Keine Sorge", "language": "de", "probability": .99},
                 automatic={"text": "Keine Sorge", "language": "de", "probability": .99}, target_language="de", profile=LanguageProfile(),
@@ -363,7 +376,7 @@ class V2QATests(unittest.TestCase):
             profile, _runtime_lock, _models_lock = _validated_profile(root)
             artifact = load_safe_calibrator(
                 root / "target_calibrator.json",
-                profile["calibrator"]["artifact_sha256"],
+                profile["calibrators"]["target"]["artifact_sha256"],
                 "char-alignment-v2",
             )
             vector = {name: 0.0 for name in artifact["features"]}
@@ -452,8 +465,8 @@ class V2QATests(unittest.TestCase):
                 runtime_lock_sha256=sha256_file(runtime_lock), models_lock_sha256=sha256_file(models_lock),
             )
             cases = [
-                ("missing calibrator", lambda value: value.update({"calibrator": {"type": "platt", "artifact_path": str(root / "missing.bin"), "artifact_sha256": "a" * 64}}), "BLOCKED_CALIBRATOR_ARTIFACT"),
-                ("bad calibrator hash", lambda value: value["calibrator"].update({"artifact_sha256": "a" * 64}), "BLOCKED_CALIBRATOR_HASH"),
+                ("missing calibrator", lambda value: value["calibrators"]["target"].update({"type": "platt", "artifact_path": str(root / "missing.bin"), "artifact_sha256": "a" * 64}), "BLOCKED_CALIBRATOR_ARTIFACT"),
+                ("bad calibrator hash", lambda value: value["calibrators"]["target"].update({"artifact_sha256": "a" * 64}), "BLOCKED_CALIBRATOR_HASH"),
                 ("feature schema", lambda value: value["identity"].update({"feature_schema_version": "word-alignment-v1"}), "BLOCKED_FEATURE_SCHEMA"),
                 ("runtime provenance", lambda value: value["provenance"].update({"runtime_lock_sha256": "f" * 64}), "BLOCKED_RUNTIME_MODEL_MISMATCH"),
                 ("missing threshold", lambda value: value["thresholds"].pop("target_pass_probability"), "BLOCKED_INCOMPLETE_PROFILE"),

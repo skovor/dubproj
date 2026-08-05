@@ -37,6 +37,11 @@ _CALIBRATOR_FEATURES = (
     "duration",
     "performance_mode",
 )
+_FINAL_ANCHOR_FEATURES = (
+    "final_coverage", "final_minimum_score", "final_mean_score", "final_duration",
+    "gap_to_active_speech_end_ms", "final_delete_count", "final_substitute_count",
+    "insertions_inside_anchor", "final_interpolated",
+)
 _PERFORMANCE_MODE_CODES = {
     "NEUTRAL": 0.0,
     "FAST": 1.0,
@@ -161,6 +166,8 @@ class LinguisticDecision:
     final_anchor_feature_vector_hash: str | None = None
     calibrator_hash: str | None = None
     calibrator_artifact_sha256: str | None = None
+    final_anchor_calibrator_hash: str | None = None
+    final_anchor_calibrator_artifact_sha256: str | None = None
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -217,6 +224,8 @@ class LinguisticDecision:
             "final_anchor_feature_vector_hash": self.final_anchor_feature_vector_hash,
             "calibrator_hash": self.calibrator_hash,
             "calibrator_artifact_sha256": self.calibrator_artifact_sha256,
+            "final_anchor_calibrator_hash": self.final_anchor_calibrator_hash,
+            "final_anchor_calibrator_artifact_sha256": self.final_anchor_calibrator_artifact_sha256,
             "reason": self.reason,
         }
 
@@ -369,7 +378,12 @@ def _resolve_calibrator_path(
     return Path(root_value) / path
 
 
-def load_safe_calibrator(path: str | Path, expected_sha256: str, expected_feature_schema: str = _FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
+def load_safe_calibrator(
+    path: str | Path,
+    expected_sha256: str,
+    expected_feature_schema: str = _FEATURE_SCHEMA_VERSION,
+    expected_features: Sequence[str] | None = None,
+) -> dict[str, Any]:
     """Load the only production calibration format: deterministic JSON."""
     artifact_path = Path(path)
     expected_hash = str(expected_sha256 or "").casefold()
@@ -383,25 +397,41 @@ def load_safe_calibrator(path: str | Path, expected_sha256: str, expected_featur
         raise ValueError("calibrator artifact must contain a JSON object")
     if payload.get("schema") != _CALIBRATOR_SCHEMA or payload.get("feature_schema_version") != expected_feature_schema or payload.get("normalization_version") != _NORMALIZATION_VERSION:
         raise ValueError("calibrator schema or normalization version is incompatible")
-    if list(payload.get("features") or ()) != list(_CALIBRATOR_FEATURES):
+    expected_feature_names = list(expected_features or _CALIBRATOR_FEATURES)
+    if list(payload.get("features") or ()) != expected_feature_names:
         raise ValueError("calibrator feature order is incompatible")
     coefficients = payload.get("coefficients")
-    if not isinstance(coefficients, list) or len(coefficients) != len(_CALIBRATOR_FEATURES):
+    if not isinstance(coefficients, list) or len(coefficients) != len(expected_feature_names):
         raise ValueError("calibrator coefficient length is incompatible")
     try:
         intercept = float(payload["intercept"])
         values = [float(value) for value in coefficients]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("calibrator coefficients are not numeric") from exc
+    normalization = payload.get("normalization")
+    if not isinstance(normalization, list) or len(normalization) != len(expected_feature_names):
+        raise ValueError("calibrator normalization length is incompatible")
+    normalized: list[dict[str, float]] = []
+    for item in normalization:
+        if not isinstance(item, Mapping):
+            raise ValueError("calibrator normalization entry is invalid")
+        try:
+            mean, scale = float(item["mean"]), float(item["scale"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("calibrator normalization is not numeric") from exc
+        if not math.isfinite(mean) or not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError("calibrator normalization must be finite with positive scales")
+        normalized.append({"mean": mean, "scale": scale})
     if not math.isfinite(intercept) or any(not math.isfinite(value) for value in values):
         raise ValueError("calibrator coefficients must be finite")
     return {
         "schema": _CALIBRATOR_SCHEMA,
         "feature_schema_version": expected_feature_schema,
         "normalization_version": _NORMALIZATION_VERSION,
-        "features": list(_CALIBRATOR_FEATURES),
+        "features": expected_feature_names,
         "coefficients": values,
         "intercept": intercept,
+        "normalization": normalized,
     }
 
 
@@ -409,19 +439,26 @@ def predict_probability(calibrator: Mapping[str, Any], feature_vector: Mapping[s
     """Evaluate a safe Platt calibrator; never coerce missing data to a score."""
     if (
         calibrator.get("schema") != _CALIBRATOR_SCHEMA
-        or calibrator.get("feature_schema_version") != _FEATURE_SCHEMA_VERSION
+        or calibrator.get("feature_schema_version") not in {_FEATURE_SCHEMA_VERSION, "final-anchor-v1", "lid-fusion-v1"}
         or calibrator.get("normalization_version") != _NORMALIZATION_VERSION
-        or list(calibrator.get("features") or ()) != list(_CALIBRATOR_FEATURES)
+        or not list(calibrator.get("features") or ())
+        or len(list(calibrator.get("features") or ())) != len(list(calibrator.get("coefficients") or ()))
     ):
         raise ValueError("unsupported calibrator schema")
     try:
+        features = list(calibrator["features"])
+        normalization = list(calibrator["normalization"])
+        if len(normalization) != len(features):
+            raise ValueError("calibrator normalization is incomplete")
         logit = float(calibrator["intercept"])
-        for name, coefficient in zip(_CALIBRATOR_FEATURES, calibrator["coefficients"]):
+        for name, coefficient, normalization_item in zip(features, calibrator["coefficients"], normalization):
             value = float(feature_vector[name])
             coefficient_value = float(coefficient)
-            if not math.isfinite(value) or not math.isfinite(coefficient_value):
+            mean = float(normalization_item["mean"])
+            scale = float(normalization_item["scale"])
+            if not math.isfinite(value) or not math.isfinite(coefficient_value) or not math.isfinite(mean) or not math.isfinite(scale) or scale <= 0.0:
                 raise ValueError("calibration features and coefficients must be finite")
-            logit += coefficient_value * value
+            logit += coefficient_value * ((value - mean) / scale)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("calibration feature vector is incomplete or invalid") from exc
     if not math.isfinite(logit):
@@ -439,6 +476,7 @@ def predict_probability(calibrator: Mapping[str, Any], feature_vector: Mapping[s
 def _load_calibrator_artifact(
     profile: Mapping[str, Any],
     *,
+    role: str = "target",
     calibrator_root: str | Path | None,
     feature_schema_version: str,
 ) -> tuple[dict[str, Any] | None, Path | None, str | None]:
@@ -448,7 +486,13 @@ def _load_calibrator_artifact(
     can therefore never obtain authority merely by pointing at a hashed file;
     the runtime must parse and execute this exact versioned schema.
     """
-    calibrator = profile.get("calibrator")
+    calibrator_set = profile.get("calibrators")
+    calibrator = calibrator_set.get(role) if isinstance(calibrator_set, Mapping) else None
+    # Legacy profiles are diagnostic-only after the multi-artifact contract;
+    # accepting their target artifact here keeps old reports readable while
+    # authority validation below rejects them.
+    if calibrator is None and role == "target" and not isinstance(calibrator_set, Mapping):
+        calibrator = profile.get("calibrator")
     if not isinstance(calibrator, Mapping):
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     if str(calibrator.get("type", "")) != "platt":
@@ -457,14 +501,17 @@ def _load_calibrator_artifact(
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     if str(calibrator.get("format", "")) != _CALIBRATOR_FORMAT:
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
-    if str(calibrator.get("feature_schema_version", "")) != str(feature_schema_version) or str(calibrator.get("normalization_version", "")) != _NORMALIZATION_VERSION:
+    expected_artifact_schema = "final-anchor-v1" if role == "final_anchor" else str(feature_schema_version)
+    if str(calibrator.get("feature_schema_version", "")) != expected_artifact_schema or str(calibrator.get("normalization_version", "")) != _NORMALIZATION_VERSION:
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     path = _resolve_calibrator_path(calibrator, profile, calibrator_root)
     expected_hash = str(calibrator.get("artifact_sha256", "")).casefold()
     if path is None or not path.is_file() or not _SHA256.fullmatch(expected_hash):
         return None, path, "BLOCKED_CALIBRATOR_ARTIFACT"
     try:
-        payload = load_safe_calibrator(path, expected_hash, feature_schema_version)
+        expected_features = _CALIBRATOR_FEATURES if role == "target" else _FINAL_ANCHOR_FEATURES
+        expected_artifact_schema = str(feature_schema_version) if role == "target" else "final-anchor-v1"
+        payload = load_safe_calibrator(path, expected_hash, expected_artifact_schema, expected_features)
     except ValueError:
         return None, path, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     return payload, path, None
@@ -516,23 +563,18 @@ def _final_anchor_feature_vector(
     expected_count = max(1, int(evidence.get("expected_characters", 0) or 0))
     duration = (float(evidence["duration_ms"]) / 1000.0) if evidence.get("duration_ms") is not None else None
     values: dict[str, Any] = {
-        "target_score": target_score,
-        "native_char_coverage": evidence.get("coverage"),
-        "mean_char_score": evidence.get("mean_score"),
-        "minimum_char_score": evidence.get("minimum_score"),
-        "p10_char_score": evidence.get("minimum_score"),
-        "delete_ratio": float(evidence.get("deleted_characters", 0) or 0) / expected_count,
-        "substitute_ratio": float(evidence.get("substituted_characters", 0) or 0) / expected_count,
-        "insert_ratio": float(evidence.get("insertions_inside_anchor", 0) or 0) / expected_count,
-        "interpolated_ratio": 1.0 if evidence.get("interpolated") else 0.0,
-        "compression_ratio": alignment_target.get("compression_ratio"),
-        "characters_per_second": (expected_count / duration) if duration and duration > 0 else None,
-        "words_per_second": (1.0 / duration) if duration and duration > 0 else None,
-        "duration": duration,
-        "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper()),
+        "final_coverage": evidence.get("coverage"),
+        "final_minimum_score": evidence.get("minimum_score"),
+        "final_mean_score": evidence.get("mean_score"),
+        "final_duration": duration,
+        "gap_to_active_speech_end_ms": evidence.get("gap_to_active_speech_end_ms"),
+        "final_delete_count": evidence.get("deleted_characters", 0),
+        "final_substitute_count": evidence.get("substituted_characters", 0),
+        "insertions_inside_anchor": evidence.get("insertions_inside_anchor", 0),
+        "final_interpolated": 1.0 if evidence.get("interpolated") else 0.0,
     }
     try:
-        result = {key: float(values[key]) for key in _CALIBRATOR_FEATURES}
+        result = {key: float(values[key]) for key in _FINAL_ANCHOR_FEATURES}
     except (KeyError, TypeError, ValueError):
         return None
     if any(not math.isfinite(value) for value in result.values()):
@@ -540,8 +582,8 @@ def _final_anchor_feature_vector(
     return result
 
 
-def _feature_vector_hash(features: Mapping[str, float]) -> str:
-    return sha256_bytes(canonical_json({"schema": "char-alignment-v2", "normalization_version": _NORMALIZATION_VERSION, "features": dict(features)}))
+def _feature_vector_hash(features: Mapping[str, float], schema: str = _FEATURE_SCHEMA_VERSION) -> str:
+    return sha256_bytes(canonical_json({"schema": schema, "normalization_version": _NORMALIZATION_VERSION, "features": dict(features)}))
 
 
 def _execute_platt_calibrator(
@@ -574,7 +616,7 @@ def calibration_profile_status(
         return "DISABLED"
     if not isinstance(profile, Mapping):
         return "BLOCKED_INCOMPLETE_PROFILE"
-    if str(profile.get("schema", "")) != "generic-dubbing-alignment-calibration-profile-v1":
+    if str(profile.get("schema", "")) != "generic-dubbing-alignment-calibration-profile-v2":
         return "BLOCKED_SCHEMA"
     if str(profile.get("status", "")) != "VALIDATED":
         return "BLOCKED_PROFILE_STATUS"
@@ -584,11 +626,13 @@ def calibration_profile_status(
         return "BLOCKED_INCOMPLETE_PROFILE"
     identity = profile.get("identity")
     thresholds = profile.get("thresholds")
-    calibrator = profile.get("calibrator")
+    calibrators = profile.get("calibrators")
+    calibrator = calibrators.get("target") if isinstance(calibrators, Mapping) else None
+    final_anchor_calibrator = calibrators.get("final_anchor") if isinstance(calibrators, Mapping) else None
     dataset = profile.get("dataset")
     metrics = profile.get("metrics")
     provenance = profile.get("provenance")
-    if not all(isinstance(item, Mapping) for item in (identity, thresholds, calibrator, dataset, metrics, provenance)):
+    if not all(isinstance(item, Mapping) for item in (identity, thresholds, calibrator, final_anchor_calibrator, dataset, metrics, provenance)):
         return "BLOCKED_INCOMPLETE_PROFILE"
     required_identity = {"backend_id", "model_id", "model_revision", "feature_schema_version", "target_language", "source_language", "performance_modes"}
     if not required_identity.issubset(identity) or not isinstance(identity.get("performance_modes"), (list, tuple, set)) or not identity.get("performance_modes"):
@@ -615,29 +659,32 @@ def calibration_profile_status(
         return "BLOCKED_INCOMPLETE_PROFILE"
     if any(value < 0.0 or value > 1.0 for value in threshold_values.values()) or threshold_values["target_failure_probability"] >= threshold_values["target_pass_probability"]:
         return "BLOCKED_INVALID_THRESHOLDS"
-    if not all(str(calibrator.get(key, "")).strip() for key in ("type", "artifact_path", "artifact_sha256")) or not _SHA256.fullmatch(str(calibrator.get("artifact_sha256", ""))):
-        return "BLOCKED_INCOMPLETE_PROFILE"
-    artifact_path = _resolve_calibrator_path(calibrator, profile, calibrator_root)
-    if artifact_path is None:
-        return "BLOCKED_CALIBRATOR_ARTIFACT"
-    if not artifact_path.is_file():
-        return "BLOCKED_CALIBRATOR_ARTIFACT"
-    try:
-        if sha256_file(artifact_path).casefold() != str(calibrator["artifact_sha256"]).casefold():
-            return "BLOCKED_CALIBRATOR_HASH"
-    except OSError:
-        return "BLOCKED_CALIBRATOR_ARTIFACT"
-    if not all(str(calibrator.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
-        return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
-    loaded, _loaded_path, executable_status = _load_calibrator_artifact(
-        profile,
-        calibrator_root=calibrator_root,
-        feature_schema_version=feature_schema_version,
-    )
-    if executable_status:
-        return executable_status
-    if loaded is None:
-        return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+    for role in ("target", "final_anchor"):
+        spec = calibrators.get(role) if isinstance(calibrators, Mapping) else None
+        if not isinstance(spec, Mapping):
+            return "BLOCKED_CALIBRATOR_SET"
+        if not all(str(spec.get(key, "")).strip() for key in ("type", "artifact_path", "artifact_sha256")) or not _SHA256.fullmatch(str(spec.get("artifact_sha256", ""))):
+            return "BLOCKED_INCOMPLETE_PROFILE"
+        artifact_path = _resolve_calibrator_path(spec, profile, calibrator_root)
+        if artifact_path is None or not artifact_path.is_file():
+            return "BLOCKED_CALIBRATOR_ARTIFACT"
+        try:
+            if sha256_file(artifact_path).casefold() != str(spec["artifact_sha256"]).casefold():
+                return "BLOCKED_CALIBRATOR_HASH"
+        except OSError:
+            return "BLOCKED_CALIBRATOR_ARTIFACT"
+        if not all(str(spec.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
+            return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
+        loaded, _loaded_path, executable_status = _load_calibrator_artifact(
+            profile,
+            role=role,
+            calibrator_root=calibrator_root,
+            feature_schema_version=feature_schema_version,
+        )
+        if executable_status:
+            return executable_status
+        if loaded is None:
+            return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     dataset_hashes = {"manifest_sha256", "labels_sha256", "split_manifest_sha256"}
     if not dataset_hashes.issubset(dataset) or any(not _SHA256.fullmatch(str(dataset.get(key, ""))) for key in dataset_hashes):
         return "BLOCKED_INCOMPLETE_PROFILE"
@@ -786,13 +833,22 @@ def apply_independent_evidence(
     final_anchor_feature_vector: dict[str, float] | None = None
     final_anchor_feature_vector_hash: str | None = None
     calibrator_hash: str | None = None
+    final_anchor_calibrator_hash: str | None = None
     if calibrated:
         calibrator, _calibrator_path, execution_status = _load_calibrator_artifact(
             calibration_profile or {},
+            role="target",
             calibrator_root=calibration_profile_root,
             feature_schema_version=feature_schema_version,
         )
-        if execution_status or calibrator is None:
+        final_anchor_calibrator, _final_anchor_path, final_anchor_status = _load_calibrator_artifact(
+            calibration_profile or {},
+            role="final_anchor",
+            calibrator_root=calibration_profile_root,
+            feature_schema_version=feature_schema_version,
+        )
+        execution_status = execution_status or final_anchor_status
+        if execution_status or calibrator is None or final_anchor_calibrator is None:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
                    "source_alignment_score": source_score, "alignment_margin": margin,
@@ -813,7 +869,8 @@ def apply_independent_evidence(
                    "calibration_profile_status": execution_status or "BLOCKED_CALIBRATOR_NOT_EXECUTABLE",
                    "reason": "validated profile could not be executed by the built-in safe calibrator"}
             )
-        calibrator_hash = str((calibration_profile or {}).get("calibrator", {}).get("artifact_sha256", ""))
+        calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("target", {})).get("artifact_sha256", ""))
+        final_anchor_calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("final_anchor", {})).get("artifact_sha256", ""))
         feature_vector = _alignment_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
         final_anchor_feature_vector = _final_anchor_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
         if feature_vector is None or final_anchor_feature_vector is None:
@@ -842,9 +899,9 @@ def apply_independent_evidence(
                    "reason": "calibrated alignment requires complete character-level features and final-anchor evidence"}
             )
         feature_vector_hash = _feature_vector_hash(feature_vector)
-        final_anchor_feature_vector_hash = _feature_vector_hash(final_anchor_feature_vector)
+        final_anchor_feature_vector_hash = _feature_vector_hash(final_anchor_feature_vector, "final-anchor-v1")
         calibrated_target_probability = _execute_platt_calibrator(calibrator, feature_vector)
-        calibrated_final_anchor_probability = _execute_platt_calibrator(calibrator, final_anchor_feature_vector)
+        calibrated_final_anchor_probability = _execute_platt_calibrator(final_anchor_calibrator, final_anchor_feature_vector)
         if calibrated_target_probability is None or calibrated_final_anchor_probability is None:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
@@ -860,6 +917,8 @@ def apply_independent_evidence(
                    "final_anchor_feature_vector_hash": final_anchor_feature_vector_hash,
                    "calibrator_hash": calibrator_hash,
                    "calibrator_artifact_sha256": calibrator_hash,
+                   "final_anchor_calibrator_hash": final_anchor_calibrator_hash,
+                   "final_anchor_calibrator_artifact_sha256": final_anchor_calibrator_hash,
                    "evidence_records": records, "evidence_families": families,
                    "calibration_authority": False,
                    "calibration_profile_status": "BLOCKED_CALIBRATION_EXECUTION",
@@ -867,7 +926,7 @@ def apply_independent_evidence(
             )
         if final_anchor_evidence is not None:
             final_anchor_evidence["calibrated_probability"] = calibrated_final_anchor_probability
-            final_anchor_evidence["calibrator_artifact_sha256"] = calibrator_hash
+            final_anchor_evidence["calibrator_artifact_sha256"] = final_anchor_calibrator_hash
             final_anchor_evidence["feature_vector_hash"] = final_anchor_feature_vector_hash
     if base.audio_sha256:
         mismatched = [item for item in records if item.get("audio_sha256") and item.get("audio_sha256") != base.audio_sha256]
@@ -999,6 +1058,8 @@ def apply_independent_evidence(
            "final_anchor_feature_vector_hash": final_anchor_feature_vector_hash,
            "calibrator_hash": calibrator_hash,
            "calibrator_artifact_sha256": calibrator_hash,
+           "final_anchor_calibrator_hash": final_anchor_calibrator_hash,
+           "final_anchor_calibrator_artifact_sha256": final_anchor_calibrator_hash,
            "evidence_records": records, "evidence_families": families,
            "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
            "calibration_authority": calibrated, "calibration_profile_status": profile_status,
