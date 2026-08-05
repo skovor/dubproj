@@ -68,7 +68,10 @@ def main(argv: list[str] | None = None) -> int:
         capabilities = json.loads(args.capabilities_json.read_text(encoding="utf-8"))
     runtime = collect_runtime_lock(device=args.device, capabilities=capabilities, omnivoice_version=args.backend_version)
     models = _read_models(args.models_manifest, args)
-    model_lock_probe = {"schema": "generic-dubbing-model-lock-v2", "status": "UNPROVISIONED", "models": models, "models_root": args.models_root}
+    # Validate the candidate contents, not the provisional status.  Checking
+    # ``UNPROVISIONED`` here made every otherwise valid local model lock fail
+    # before its status could be promoted to COMPLETE.
+    model_lock_probe = {"schema": "generic-dubbing-model-lock-v2", "status": "COMPLETE", "models": models, "models_root": args.models_root}
     model_errors = validate_models_lock(model_lock_probe, strict=True)
     model_errors.extend(verify_model_files(model_lock_probe, base_dir=out_dir, strict=True))
     model_status = "COMPLETE" if not model_errors else "UNPROVISIONED"
