@@ -70,7 +70,7 @@ def _validate_report(report: ValidationReport, *, role: str, split: str) -> None
             raise PromotionError(f"{role} report has an invalid prediction")
 
 
-def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | Mapping[str, Any], final_anchor_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, lid_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, validation: ValidationReport, hidden: ValidationReport, dataset_files: Mapping[str, str | Path], identity: Mapping[str, Any], thresholds: Mapping[str, float], provenance: Mapping[str, Any], output: str | Path, validation_rows: Iterable[Any] | None = None, hidden_rows: Iterable[Any] | None = None, role_validation_rows: Mapping[str, Iterable[Any]] | None = None, role_hidden_rows: Mapping[str, Iterable[Any]] | None = None, role_validation_reports: Mapping[str, ValidationReport] | None = None, role_hidden_reports: Mapping[str, ValidationReport] | None = None, minimum_class_count: int = 2, hidden_evaluation_receipt: Mapping[str, Any] | None = None, require_hidden_evaluation_receipt: bool = False) -> dict[str, Any]:
+def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | Mapping[str, Any], final_anchor_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, lid_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, validation: ValidationReport, hidden: ValidationReport, dataset_files: Mapping[str, str | Path], identity: Mapping[str, Any], thresholds: Mapping[str, float], provenance: Mapping[str, Any], output: str | Path, validation_rows: Iterable[Any] | None = None, hidden_rows: Iterable[Any] | None = None, role_validation_rows: Mapping[str, Iterable[Any]] | None = None, role_hidden_rows: Mapping[str, Iterable[Any]] | None = None, role_validation_reports: Mapping[str, ValidationReport] | None = None, role_hidden_reports: Mapping[str, ValidationReport] | None = None, minimum_class_count: int = 2, hidden_evaluation_receipt: Mapping[str, Any] | None = None, require_hidden_evaluation_receipt: bool = False, hidden_evaluation_finalization: Mapping[str, Any] | None = None, goldset_store: Any | None = None, require_hidden_evaluation_finalization: bool = False) -> dict[str, Any]:
     """Create VALIDATED only from sealed rows and recomputed predictions.
 
     Precomputed JSON reports are treated as claims, not evidence.  Callers
@@ -82,6 +82,17 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
     _validate_report(hidden, role="target", split="hidden_test")
     if require_hidden_evaluation_receipt and not verify_hidden_evaluation_receipt_payload(hidden_evaluation_receipt or {}):
         raise PromotionError("a verified one-shot hidden evaluation receipt is required")
+    if require_hidden_evaluation_finalization:
+        if goldset_store is None or not hidden_evaluation_finalization:
+            raise PromotionError("authoritative hidden evaluation finalization is required")
+        try:
+            goldset_store.verify_hidden_evaluation_finalization(
+                str(hidden_evaluation_finalization.get("finalization_id", "")),
+                profile_id=profile_id,
+                code_commit=str(provenance.get("code_commit", "")),
+            )
+        except Exception as exc:
+            raise PromotionError("authoritative hidden evaluation finalization could not be verified") from exc
     if validation_rows is None or hidden_rows is None:
         raise PromotionError("sealed validation_rows and hidden_rows are required; reports alone are not evidence")
     # The legacy arguments remain aliases for target evidence only.  Anchor and
@@ -154,6 +165,7 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
         "lock_sha256": {"runtime": str(provenance["runtime_lock_sha256"]).lower(), "models": str(provenance["models_lock_sha256"]).lower()},
         "report_prediction_sha256": report_digests,
         "hidden_evaluation_receipt_sha256": str((hidden_evaluation_receipt or {}).get("receipt_sha256", "")),
+        "hidden_evaluation_finalization_sha256": str((hidden_evaluation_finalization or {}).get("finalization_sha256", "")),
     }
     destination = Path(output)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -167,7 +179,7 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
         "calibrators": {"target": target_spec, "final_anchor": anchor_spec, "lid": lid_spec},
         "dataset": {**hashes, "calibration_count": int(artifact.get("sample_count", 0)), "validation_count": validation.count, "hidden_test_count": hidden.count},
         "metrics": {"hidden_false_pass_count": hidden.false_pass_count, "hidden_false_fail_count": hidden.false_fail_count, "brier_score": hidden.brier_score, "expected_calibration_error": hidden.expected_calibration_error, "validation": validation.to_dict(), "validation_predictions_sha256": _prediction_digest(validation), "hidden_predictions_sha256": _prediction_digest(hidden), "reports": reports, "recomputed": True},
-        "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id, "hidden_evaluation_receipt_sha256": str((hidden_evaluation_receipt or {}).get("receipt_sha256", "")), "promotion_receipt_path": str(receipt_path), "promotion_receipt_sha256": receipt_sha},
+        "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id, "hidden_evaluation_receipt_sha256": str((hidden_evaluation_receipt or {}).get("receipt_sha256", "")), "hidden_evaluation_finalization_sha256": str((hidden_evaluation_finalization or {}).get("finalization_sha256", "")), "promotion_receipt_path": str(receipt_path), "promotion_receipt_sha256": receipt_sha},
     }
     profile_payload = promotion_profile_payload(profile)
     profile_payload_sha = promotion_profile_payload_sha256(profile)
@@ -178,6 +190,12 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
     receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
     profile["provenance"]["promotion_receipt_sha256"] = receipt_sha
     profile["provenance"]["promoted_profile_payload_sha256"] = profile_payload_sha
+    if require_hidden_evaluation_finalization:
+        try:
+            consumed = goldset_store.consume_hidden_finalization(str(hidden_evaluation_finalization.get("finalization_id", "")), profile_id=profile_id, code_commit=str(provenance["code_commit"]))
+        except Exception as exc:
+            raise PromotionError("authoritative hidden evaluation finalization could not be consumed") from exc
+        profile["provenance"]["hidden_evaluation_finalization_consumed_at"] = consumed.get("consumed_at")
     destination.write_text(json.dumps(profile, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); return profile
 
 __all__ = ["PromotionError", "promote_profile"]

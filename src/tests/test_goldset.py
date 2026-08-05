@@ -117,4 +117,23 @@ class GoldsetTests(unittest.TestCase):
                 store.open_hidden_evaluation("operator", "run-2")
             store.close()
 
+    def test_hidden_finalization_is_authoritative_exact_and_one_shot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite")
+            clip_value = clip("hidden", "hidden-line", "hidden_test")
+            store.add_clip(clip_value); store.save_label(HumanLabel("hidden", "reviewer-a", labels=("CORRECT_NEUTRAL",))); store.save_label(HumanLabel("hidden", "reviewer-b", labels=("CORRECT_NEUTRAL",))); store.adjudicate("hidden", "lead", ("CORRECT_NEUTRAL",)); store.seal_hidden_test("operator")
+            receipt = store.open_hidden_evaluation("operator", "run-final")
+            def row(role):
+                return {"clip_id": "hidden", "split": "hidden_test", "split_group": "hidden-line", "label": 0, "features": {"x": 0.1}, "metadata": {"audio_sha256": clip_value.audio_sha256, "label_hash": "a" * 64, "evidence_hash": "b" * 64, "role": role}}
+            rows = {role: [row(role)] for role in ("target", "final_anchor", "lid")}
+            reports = {role: {"run_id": f"{role}-run"} for role in rows}
+            finalization = store.finalize_hidden_evaluation(receipt_id=receipt["receipt_id"], run_id="run-final", profile_id="profile", code_commit="a" * 40, role_hidden_rows=rows, role_hidden_reports=reports, hidden_jsonl_hashes={role: "c" * 64 for role in rows}, hidden_report_hashes={role: "d" * 64 for role in rows})
+            verified = store.verify_hidden_evaluation_finalization(finalization["finalization_id"], profile_id="profile", code_commit="a" * 40)
+            self.assertIsNone(verified["consumed_at"])
+            consumed = store.consume_hidden_finalization(finalization["finalization_id"], profile_id="profile", code_commit="a" * 40)
+            self.assertIsNotNone(consumed["consumed_at"])
+            with self.assertRaises(ValueError):
+                store.consume_hidden_finalization(finalization["finalization_id"], profile_id="profile", code_commit="a" * 40)
+            store.close()
+
 if __name__ == "__main__": unittest.main()

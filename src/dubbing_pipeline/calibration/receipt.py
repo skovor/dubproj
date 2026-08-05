@@ -32,6 +32,7 @@ def promotion_profile_payload(profile: Mapping[str, Any]) -> dict[str, Any]:
                 "models_lock_sha256",
                 "hidden_test_run_id",
                 "hidden_evaluation_receipt_sha256",
+                "hidden_evaluation_finalization_sha256",
             )
             if key in provenance
         },

@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dubbing_pipeline.calibration import FeatureRow, LIDFeatureRow, load_draft
 from dubbing_pipeline.calibration.promote import promote_profile
 from dubbing_pipeline.calibration.validate import ValidationReport, evaluate
+from dubbing_pipeline.goldset import GoldsetStore
 
 
 def _sha(path: Path) -> str:
@@ -66,7 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models-lock", required=True)
     parser.add_argument("--runtime-lock", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--hidden-evaluation-receipt", required=True, help="one-shot receipt issued by GoldsetStore.open_hidden_evaluation")
+    parser.add_argument("--goldset-db", required=True, help="authoritative SQLite GoldsetStore")
+    parser.add_argument("--hidden-receipt-id", required=True)
+    parser.add_argument("--hidden-run-id", required=True)
     args = parser.parse_args(argv)
     target_path, final_path, lid_path = Path(args.target_artifact), Path(args.final_artifact), Path(args.lid_artifact)
     target = load_draft(target_path); final = load_draft(final_path); lid = load_draft(lid_path)
@@ -83,8 +86,21 @@ def main(argv: list[str] | None = None) -> int:
     identity = {"backend_id": backend_id, "model_id": str(model.get("model_id", "")), "model_revision": str(model.get("revision", "")), "feature_schema_version": str(target.get("feature_schema_version", "")), "target_language": str(model.get("language", "de")), "source_language": "en", "performance_modes": sorted({row.performance_mode for row in feature_rows})}
     thresholds = {"target_pass_probability": .8, "target_failure_probability": .2, "final_anchor_pass_probability": .8, "source_lid_probability": .8}
     provenance = {"code_commit": _git_sha(), "runtime_lock_sha256": _sha(runtime_path), "models_lock_sha256": _sha(models_path)}
-    hidden_receipt = json.loads(Path(args.hidden_evaluation_receipt).read_text(encoding="utf-8"))
-    profile = promote_profile(profile_id=f"{identity['model_id']}-{uuid.uuid4().hex[:8]}", target_artifact={**target, "artifact_path": str(target_path), "artifact_sha256": _sha(target_path)}, final_anchor_artifact={**final, "artifact_path": str(final_path), "artifact_sha256": _sha(final_path)}, lid_artifact={**lid, "artifact_path": str(lid_path), "artifact_sha256": _sha(lid_path)}, validation=validation, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, role_validation_rows={"target": validation_rows, "final_anchor": anchor_validation_rows, "lid": lid_validation_rows}, role_hidden_rows={"target": hidden_rows, "final_anchor": anchor_hidden_rows, "lid": lid_hidden_rows}, role_validation_reports={"target": validation, "final_anchor": anchor_validation, "lid": lid_validation}, role_hidden_reports={"target": hidden, "final_anchor": anchor_hidden, "lid": lid_hidden}, dataset_files={"manifest_sha256": args.manifest, "labels_sha256": args.labels, "split_manifest_sha256": args.splits}, identity=identity, thresholds=thresholds, provenance=provenance, output=args.output, hidden_evaluation_receipt=hidden_receipt, require_hidden_evaluation_receipt=True)
+    profile_id = f"{identity['model_id']}-{uuid.uuid4().hex[:8]}"
+    store = GoldsetStore(args.goldset_db)
+    try:
+        hidden_receipt = store.get_hidden_evaluation_receipt(args.hidden_receipt_id, args.hidden_run_id)
+        finalization = store.finalize_hidden_evaluation(
+            receipt_id=args.hidden_receipt_id, run_id=args.hidden_run_id, profile_id=profile_id,
+            code_commit=provenance["code_commit"],
+            role_hidden_rows={"target": hidden_rows, "final_anchor": anchor_hidden_rows, "lid": lid_hidden_rows},
+            role_hidden_reports={"target": hidden.to_dict(), "final_anchor": anchor_hidden.to_dict(), "lid": lid_hidden.to_dict()},
+            hidden_jsonl_hashes={"target": _sha(Path(args.features)), "final_anchor": _sha(Path(args.final_features)), "lid": _sha(Path(args.lid_features))},
+            hidden_report_hashes={"target": _sha(Path(args.hidden_report)), "final_anchor": _sha(Path(args.final_hidden_report)), "lid": _sha(Path(args.lid_hidden_report))},
+        )
+        profile = promote_profile(profile_id=profile_id, target_artifact={**target, "artifact_path": str(target_path), "artifact_sha256": _sha(target_path)}, final_anchor_artifact={**final, "artifact_path": str(final_path), "artifact_sha256": _sha(final_path)}, lid_artifact={**lid, "artifact_path": str(lid_path), "artifact_sha256": _sha(lid_path)}, validation=validation, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, role_validation_rows={"target": validation_rows, "final_anchor": anchor_validation_rows, "lid": lid_validation_rows}, role_hidden_rows={"target": hidden_rows, "final_anchor": anchor_hidden_rows, "lid": lid_hidden_rows}, role_validation_reports={"target": validation, "final_anchor": anchor_validation, "lid": lid_validation}, role_hidden_reports={"target": hidden, "final_anchor": anchor_hidden, "lid": lid_hidden}, dataset_files={"manifest_sha256": args.manifest, "labels_sha256": args.labels, "split_manifest_sha256": args.splits}, identity=identity, thresholds=thresholds, provenance=provenance, output=args.output, hidden_evaluation_receipt=hidden_receipt, require_hidden_evaluation_receipt=True, hidden_evaluation_finalization=finalization, goldset_store=store, require_hidden_evaluation_finalization=True)
+    finally:
+        store.close()
     print(json.dumps(profile, ensure_ascii=False, indent=2))
     return 0
 

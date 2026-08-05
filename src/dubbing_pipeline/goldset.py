@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 from functools import wraps
@@ -161,6 +162,14 @@ class GoldsetStore:
             CREATE TABLE IF NOT EXISTS hidden_evaluations (
                 receipt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE,
                 payload TEXT NOT NULL, receipt_sha256 TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS hidden_finalizations (
+                finalization_id TEXT PRIMARY KEY, receipt_id TEXT NOT NULL,
+                run_id TEXT NOT NULL UNIQUE, profile_id TEXT NOT NULL,
+                code_commit TEXT NOT NULL, payload TEXT NOT NULL,
+                finalization_sha256 TEXT NOT NULL, consumed_at TEXT,
+                consumed_by_profile_id TEXT, consumed_by_code_commit TEXT,
+                FOREIGN KEY (receipt_id) REFERENCES hidden_evaluations(receipt_id)
             );
         """)
         self._migrate_claims()
@@ -345,6 +354,127 @@ class GoldsetStore:
             return False
         actual = [dict(item) for item in self._db.execute("SELECT clip_id, audio_sha256, split, split_group FROM clips WHERE split='hidden_test' ORDER BY clip_id")]
         return actual == list(receipt.get("clips") or []) and self.verify_hidden_seal()
+
+    @_db_locked
+    def get_hidden_evaluation_receipt(self, receipt_id: str, run_id: str | None = None) -> dict[str, Any]:
+        """Return the receipt stored in SQLite, never an operator supplied JSON claim."""
+        query = "SELECT payload FROM hidden_evaluations WHERE receipt_id=?"
+        args: list[Any] = [_text(receipt_id)]
+        if run_id is not None:
+            query += " AND run_id=?"; args.append(_text(run_id))
+        row = self._db.execute(query, args).fetchone()
+        if row is None:
+            raise ValueError("hidden evaluation receipt is not present in the authoritative store")
+        receipt = json.loads(row["payload"])
+        if not self.verify_hidden_evaluation_receipt(receipt):
+            raise ValueError("authoritative hidden evaluation receipt failed verification")
+        return receipt
+
+    @_db_locked
+    def finalize_hidden_evaluation(
+        self, *, receipt_id: str, run_id: str, profile_id: str, code_commit: str,
+        role_hidden_rows: Mapping[str, Iterable[Any]],
+        role_hidden_reports: Mapping[str, Mapping[str, Any]],
+        hidden_jsonl_hashes: Mapping[str, str],
+        hidden_report_hashes: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Finalize all hidden roles against the sealed DB before promotion.
+
+        This is deliberately a database operation: a JSON receipt with a valid
+        self-hash is not evidence.  Every role must contain exactly the sealed
+        clip set, the immutable audio digest and frozen human/evidence hashes.
+        """
+        receipt = self.get_hidden_evaluation_receipt(receipt_id, run_id)
+        roles = ("target", "final_anchor", "lid")
+        if set(role_hidden_rows) != set(roles) or set(role_hidden_reports) != set(roles):
+            raise ValueError("all three independent hidden roles are required")
+        sealed = {str(item["clip_id"]): dict(item) for item in receipt.get("clips", [])}
+        if not sealed:
+            raise ValueError("hidden evaluation receipt has no clips")
+
+        def row_dict(value: Any) -> dict[str, Any]:
+            if hasattr(value, "to_dict"):
+                value = value.to_dict()
+            if not isinstance(value, Mapping):
+                raise ValueError("hidden evidence row is not a mapping")
+            return dict(value)
+
+        rows_by_role: dict[str, list[dict[str, Any]]] = {}
+        row_digests: dict[str, str] = {}
+        for role in roles:
+            rows = [row_dict(row) for row in role_hidden_rows[role]]
+            ids = [str(row.get("clip_id", "")) for row in rows]
+            if len(ids) != len(set(ids)) or set(ids) != set(sealed):
+                raise ValueError(f"{role} hidden rows do not exactly match the sealed clip set")
+            for row in rows:
+                clip_id = str(row["clip_id"]); metadata = row.get("metadata")
+                if not isinstance(metadata, Mapping):
+                    raise ValueError(f"{role}/{clip_id} is missing immutable metadata")
+                if str(metadata.get("audio_sha256", "")).casefold() != str(sealed[clip_id]["audio_sha256"]).casefold():
+                    raise ValueError(f"{role}/{clip_id} audio hash is not the sealed hash")
+                for key in ("label_hash", "evidence_hash"):
+                    if not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get(key, "")).casefold()):
+                        raise ValueError(f"{role}/{clip_id} lacks frozen {key}")
+            rows.sort(key=lambda item: str(item["clip_id"]))
+            rows_by_role[role] = rows
+            row_digests[role] = sha256_bytes(canonical_json(rows))
+            report = role_hidden_reports[role]
+            if not isinstance(report, Mapping) or not str(report.get("run_id", "")).strip():
+                raise ValueError(f"{role} hidden report has no one-shot run_id")
+        for name, hashes in (("hidden_jsonl", hidden_jsonl_hashes), ("hidden_report", hidden_report_hashes)):
+            if set(hashes) != set(roles) or any(not re.fullmatch(r"[0-9a-f]{64}", str(value).casefold()) for value in hashes.values()):
+                raise ValueError(f"{name} hashes must cover all roles with SHA-256 values")
+        if not re.fullmatch(r"[0-9a-fA-F]{40,64}", _text(code_commit)) or not _text(profile_id):
+            raise ValueError("profile_id and a real code commit are required")
+        payload = {
+            "schema": "hidden-evaluation-finalization-v1", "receipt_id": receipt["receipt_id"],
+            "receipt_sha256": receipt["receipt_sha256"], "run_id": _text(run_id),
+            "profile_id": _text(profile_id), "code_commit": _text(code_commit).lower(),
+            "sealed_clip_ids": sorted(sealed), "sealed_audio_sha256": {key: sealed[key]["audio_sha256"] for key in sorted(sealed)},
+            "role_row_sha256": row_digests, "hidden_jsonl_sha256": dict(hidden_jsonl_hashes),
+            "hidden_report_sha256": dict(hidden_report_hashes),
+            "role_report_run_ids": {role: str(role_hidden_reports[role]["run_id"]) for role in roles},
+        }
+        finalization_sha = sha256_bytes(canonical_json(payload))
+        finalization = {**payload, "finalization_id": f"hidden-final-{finalization_sha[:16]}", "finalization_sha256": finalization_sha}
+        try:
+            self._db.execute("INSERT INTO hidden_finalizations VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (finalization["finalization_id"], receipt["receipt_id"], _text(run_id), _text(profile_id), _text(code_commit).lower(), canonical_json(finalization), finalization_sha))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("this hidden evaluation run has already been finalized") from exc
+        self._db.commit()
+        return finalization
+
+    @_db_locked
+    def verify_hidden_evaluation_finalization(self, finalization_id: str, *, profile_id: str | None = None, code_commit: str | None = None) -> dict[str, Any]:
+        row = self._db.execute("SELECT * FROM hidden_finalizations WHERE finalization_id=?", (_text(finalization_id),)).fetchone()
+        if row is None:
+            raise ValueError("hidden finalization is not present in the authoritative store")
+        finalization = json.loads(row["payload"])
+        payload = {key: finalization[key] for key in finalization if key not in {"finalization_id", "finalization_sha256"}}
+        if finalization.get("finalization_sha256") != sha256_bytes(canonical_json(payload)):
+            raise ValueError("hidden finalization digest mismatch")
+        receipt = self.get_hidden_evaluation_receipt(str(row["receipt_id"]), str(row["run_id"]))
+        if finalization.get("receipt_sha256") != receipt.get("receipt_sha256") or finalization.get("sealed_clip_ids") != sorted(str(item["clip_id"]) for item in receipt.get("clips", [])):
+            raise ValueError("hidden finalization is not bound to the sealed receipt")
+        if profile_id is not None and str(row["profile_id"]) != _text(profile_id):
+            raise ValueError("hidden finalization profile identity mismatch")
+        if code_commit is not None and str(row["code_commit"]).lower() != _text(code_commit).lower():
+            raise ValueError("hidden finalization code identity mismatch")
+        return {**finalization, "consumed_at": row["consumed_at"], "consumed_by_profile_id": row["consumed_by_profile_id"], "consumed_by_code_commit": row["consumed_by_code_commit"]}
+
+    @_db_locked
+    def consume_hidden_finalization(self, finalization_id: str, *, profile_id: str, code_commit: str) -> dict[str, Any]:
+        """Atomically reserve one authoritative finalization for one profile."""
+        finalization = self.verify_hidden_evaluation_finalization(finalization_id, profile_id=profile_id, code_commit=code_commit)
+        if finalization.get("consumed_at"):
+            raise ValueError("hidden finalization has already been consumed")
+        from datetime import datetime, timezone
+        consumed_at = datetime.now(timezone.utc).isoformat()
+        updated = self._db.execute("UPDATE hidden_finalizations SET consumed_at=?, consumed_by_profile_id=?, consumed_by_code_commit=? WHERE finalization_id=? AND consumed_at IS NULL", (consumed_at, _text(profile_id), _text(code_commit).lower(), _text(finalization_id)))
+        if updated.rowcount != 1:
+            self._db.rollback(); raise ValueError("hidden finalization was consumed concurrently")
+        self._db.commit()
+        return self.verify_hidden_evaluation_finalization(finalization_id, profile_id=profile_id, code_commit=code_commit)
 
     @_db_locked
     def clips(self) -> list[ClipRecord]:
