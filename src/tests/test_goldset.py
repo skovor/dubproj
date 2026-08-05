@@ -3,6 +3,7 @@ import tempfile, unittest
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dubbing_pipeline.goldset import ClipRecord, GoldsetStore, HumanLabel, stable_split, validate_goldset
+from dubbing_pipeline.hashing import canonical_json, sha256_bytes
 
 SHA = "a" * 64
 
@@ -123,9 +124,16 @@ class GoldsetTests(unittest.TestCase):
             clip_value = clip("hidden", "hidden-line", "hidden_test")
             store.add_clip(clip_value); store.save_label(HumanLabel("hidden", "reviewer-a", labels=("CORRECT_NEUTRAL",))); store.save_label(HumanLabel("hidden", "reviewer-b", labels=("CORRECT_NEUTRAL",))); store.adjudicate("hidden", "lead", ("CORRECT_NEUTRAL",)); store.seal_hidden_test("operator")
             receipt = store.open_hidden_evaluation("operator", "run-final")
+            auth = store.authoritative_hidden_label_evidence("hidden")
             def row(role):
-                return {"clip_id": "hidden", "split": "hidden_test", "split_group": "hidden-line", "label": 0, "features": {"x": 0.1}, "metadata": {"audio_sha256": clip_value.audio_sha256, "label_hash": "a" * 64, "evidence_hash": "b" * 64, "role": role}}
+                evidence = {"role": role}; binary = auth[{"target": "target_binary_label", "final_anchor": "final_anchor_binary_label", "lid": "lid_binary_label"}[role]]
+                evidence_sha = sha256_bytes(canonical_json(evidence))
+                return {"clip_id": "hidden", "split": "hidden_test", "split_group": "hidden-line", "label": binary, "features": {"x": 0.1}, "metadata": {"audio_sha256": clip_value.audio_sha256, "label_payload_sha256": auth["label_payload_sha256"], "evidence_sha256": evidence_sha, "role": role}}
             rows = {role: [row(role)] for role in ("target", "final_anchor", "lid")}
+            receipts = []
+            for role in rows:
+                evidence = {"role": role}; payload = {"schema": "goldset-feature-bridge-receipt-v1", "clip_id": "hidden", "role": role, "audio_sha256": clip_value.audio_sha256, "label_payload_sha256": auth["label_payload_sha256"], "binary_label": rows[role][0]["label"], "features": {"x": 0.1}, "feature_schema_version": {"target": "char-alignment-v3", "final_anchor": "final-anchor-v1", "lid": "lid-fusion-v3"}[role], "evidence": evidence, "evidence_sha256": sha256_bytes(canonical_json(evidence)), "extractor_id": "test", "extractor_version": "1", "code_commit": "a" * 40, "runtime_lock_sha256": "c" * 64, "models_lock_sha256": "d" * 64}; receipts.append({**payload, "receipt_sha256": sha256_bytes(canonical_json(payload))})
+            store.record_bridge_receipts("run-final", receipts)
             reports = {role: {"run_id": f"{role}-run"} for role in rows}
             finalization = store.finalize_hidden_evaluation(receipt_id=receipt["receipt_id"], run_id="run-final", profile_id="profile", code_commit="a" * 40, role_hidden_rows=rows, role_hidden_reports=reports, hidden_jsonl_hashes={role: "c" * 64 for role in rows}, hidden_report_hashes={role: "d" * 64 for role in rows})
             verified = store.verify_hidden_evaluation_finalization(finalization["finalization_id"], profile_id="profile", code_commit="a" * 40)

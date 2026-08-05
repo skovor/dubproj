@@ -25,6 +25,9 @@ LABELS = (
     "TIMING_BAD", "MOUNT_BAD", "UNDECIDABLE",
 )
 SPLITS = ("calibration", "validation", "hidden_test")
+TARGET_BAD_LABELS = frozenset({"LEXICAL_ERROR", "PRONUNCIATION_BAD", "SOURCE_LANGUAGE_LEAK", "UNDECIDABLE"})
+FINAL_ANCHOR_BAD_LABELS = frozenset({"FINAL_ANCHOR_MISSING", "TIMING_BAD", "MOUNT_BAD", "UNDECIDABLE"})
+LID_BAD_LABELS = frozenset({"SOURCE_LANGUAGE_LEAK"})
 _REVIEW_FIELDS = {"clip_id", "scene_id", "line_id", "candidate_id", "speaker_id", "expected_text", "source_text", "performance_mode", "audio_path", "context_path", "source_reference_path"}
 
 
@@ -170,6 +173,13 @@ class GoldsetStore:
                 finalization_sha256 TEXT NOT NULL, consumed_at TEXT,
                 consumed_by_profile_id TEXT, consumed_by_code_commit TEXT,
                 FOREIGN KEY (receipt_id) REFERENCES hidden_evaluations(receipt_id)
+            );
+            CREATE TABLE IF NOT EXISTS bridge_receipts (
+                receipt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL,
+                clip_id TEXT NOT NULL, role TEXT NOT NULL, payload TEXT NOT NULL,
+                receipt_sha256 TEXT NOT NULL,
+                UNIQUE(run_id, clip_id, role),
+                FOREIGN KEY (clip_id) REFERENCES clips(clip_id)
             );
         """)
         self._migrate_claims()
@@ -356,6 +366,67 @@ class GoldsetStore:
         return actual == list(receipt.get("clips") or []) and self.verify_hidden_seal()
 
     @_db_locked
+    def authoritative_hidden_label_evidence(self, clip_id: str) -> dict[str, Any]:
+        """Rebuild immutable calibration labels from the SQLite human record."""
+        clip_row = self._db.execute("SELECT split, audio_sha256 FROM clips WHERE clip_id=?", (_text(clip_id),)).fetchone()
+        if clip_row is None:
+            raise ValueError(f"unknown clip: {clip_id}")
+        labels = [label for label in self.effective_labels() if label.clip_id == _text(clip_id)]
+        if not labels:
+            raise ValueError(f"clip has no effective human label: {clip_id}")
+        canonical_labels = sorted((label.to_dict() for label in labels), key=lambda value: (str(value.get("reviewer_id", "")), tuple(value.get("labels", []))))
+        selected = {item for label in labels for item in label.labels}
+        if "UNDECIDABLE" in selected:
+            raise ValueError(f"clip has undecidable human label: {clip_id}")
+        return {
+            "clip_id": _text(clip_id), "audio_sha256": str(clip_row["audio_sha256"]),
+            "split": str(clip_row["split"]), "canonical_labels": canonical_labels,
+            "label_payload_sha256": sha256_bytes(canonical_json(canonical_labels)),
+            "target_binary_label": 0 if selected & TARGET_BAD_LABELS else 1,
+            "final_anchor_binary_label": 0 if selected & FINAL_ANCHOR_BAD_LABELS else 1,
+            "lid_binary_label": 0 if selected & LID_BAD_LABELS else 1,
+        }
+
+    @_db_locked
+    def record_bridge_receipts(self, run_id: str, receipts: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+        run_id = _text(run_id)
+        if not run_id:
+            raise ValueError("bridge run_id is required")
+        digests: dict[str, str] = {}
+        for value in receipts:
+            receipt = dict(value)
+            if receipt.get("schema") != "goldset-feature-bridge-receipt-v1":
+                raise ValueError("invalid bridge receipt schema")
+            receipt_sha = str(receipt.get("receipt_sha256", "")).casefold()
+            payload = {key: receipt[key] for key in receipt if key != "receipt_sha256"}
+            if receipt_sha != sha256_bytes(canonical_json(payload)):
+                raise ValueError("bridge receipt digest mismatch")
+            clip_id, role = _text(receipt.get("clip_id")), _text(receipt.get("role"))
+            if not clip_id or role not in {"target", "final_anchor", "lid"}:
+                raise ValueError("bridge receipt clip and role are required")
+            receipt_id = f"bridge-{receipt_sha[:16]}"
+            try:
+                self._db.execute("INSERT INTO bridge_receipts VALUES (?, ?, ?, ?, ?, ?)", (receipt_id, run_id, clip_id, role, canonical_json(receipt), receipt_sha))
+            except sqlite3.IntegrityError:
+                existing = self._db.execute("SELECT payload FROM bridge_receipts WHERE run_id=? AND clip_id=? AND role=?", (run_id, clip_id, role)).fetchone()
+                if existing is None or json.loads(existing["payload"]) != receipt:
+                    raise ValueError("bridge receipt already exists with different content")
+            digests[f"{clip_id}:{role}"] = receipt_sha
+        self._db.commit()
+        return digests
+
+    @_db_locked
+    def get_bridge_receipt(self, run_id: str, clip_id: str, role: str) -> dict[str, Any]:
+        row = self._db.execute("SELECT payload FROM bridge_receipts WHERE run_id=? AND clip_id=? AND role=?", (_text(run_id), _text(clip_id), _text(role))).fetchone()
+        if row is None:
+            raise ValueError("authoritative bridge receipt is missing")
+        receipt = json.loads(row["payload"])
+        payload = {key: receipt[key] for key in receipt if key != "receipt_sha256"}
+        if receipt.get("receipt_sha256") != sha256_bytes(canonical_json(payload)):
+            raise ValueError("authoritative bridge receipt is corrupted")
+        return receipt
+
+    @_db_locked
     def get_hidden_evaluation_receipt(self, receipt_id: str, run_id: str | None = None) -> dict[str, Any]:
         """Return the receipt stored in SQLite, never an operator supplied JSON claim."""
         query = "SELECT payload FROM hidden_evaluations WHERE receipt_id=?"
@@ -385,6 +456,7 @@ class GoldsetStore:
         clip set, the immutable audio digest and frozen human/evidence hashes.
         """
         receipt = self.get_hidden_evaluation_receipt(receipt_id, run_id)
+        hidden_receipt = receipt
         roles = ("target", "final_anchor", "lid")
         if set(role_hidden_rows) != set(roles) or set(role_hidden_reports) != set(roles):
             raise ValueError("all three independent hidden roles are required")
@@ -401,6 +473,10 @@ class GoldsetStore:
 
         rows_by_role: dict[str, list[dict[str, Any]]] = {}
         row_digests: dict[str, str] = {}
+        role_labels: dict[str, dict[str, Any]] = {}
+        bridge_digests: dict[str, str] = {}
+        expected_binary = {"target": "target_binary_label", "final_anchor": "final_anchor_binary_label", "lid": "lid_binary_label"}
+        expected_schema = {"target": "char-alignment-v3", "final_anchor": "final-anchor-v1", "lid": "lid-fusion-v3"}
         for role in roles:
             rows = [row_dict(row) for row in role_hidden_rows[role]]
             ids = [str(row.get("clip_id", "")) for row in rows]
@@ -412,9 +488,27 @@ class GoldsetStore:
                     raise ValueError(f"{role}/{clip_id} is missing immutable metadata")
                 if str(metadata.get("audio_sha256", "")).casefold() != str(sealed[clip_id]["audio_sha256"]).casefold():
                     raise ValueError(f"{role}/{clip_id} audio hash is not the sealed hash")
-                for key in ("label_hash", "evidence_hash"):
-                    if not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get(key, "")).casefold()):
-                        raise ValueError(f"{role}/{clip_id} lacks frozen {key}")
+                authoritative = self.authoritative_hidden_label_evidence(clip_id)
+                receipt = self.get_bridge_receipt(run_id, clip_id, role)
+                if str(receipt.get("role")) != role or str(receipt.get("clip_id")) != clip_id:
+                    raise ValueError(f"{role}/{clip_id} bridge receipt identity mismatch")
+                if str(receipt.get("audio_sha256", "")).casefold() != str(authoritative["audio_sha256"]).casefold():
+                    raise ValueError(f"{role}/{clip_id} bridge audio hash mismatch")
+                if str(receipt.get("label_payload_sha256", "")).casefold() != str(authoritative["label_payload_sha256"]).casefold():
+                    raise ValueError(f"{role}/{clip_id} bridge label evidence mismatch")
+                if int(row.get("label", -1)) != int(authoritative[expected_binary[role]]) or int(receipt.get("binary_label", -1)) != int(authoritative[expected_binary[role]]):
+                    raise ValueError(f"{role}/{clip_id} binary label does not match human consensus")
+                if dict(row.get("features") or {}) != dict(receipt.get("features") or {}):
+                    raise ValueError(f"{role}/{clip_id} features differ from authoritative bridge receipt")
+                if str(receipt.get("feature_schema_version", "")) != expected_schema[role]:
+                    raise ValueError(f"{role}/{clip_id} feature schema mismatch")
+                evidence_payload = receipt.get("evidence")
+                if not isinstance(evidence_payload, Mapping) or str(receipt.get("evidence_sha256", "")).casefold() != sha256_bytes(canonical_json(evidence_payload)):
+                    raise ValueError(f"{role}/{clip_id} evidence digest cannot be recomputed")
+                if str(metadata.get("label_payload_sha256", metadata.get("label_hash", ""))).casefold() != str(authoritative["label_payload_sha256"]).casefold() or str(metadata.get("evidence_sha256", metadata.get("evidence_hash", ""))).casefold() != str(receipt["evidence_sha256"]).casefold():
+                    raise ValueError(f"{role}/{clip_id} row metadata is not authoritative")
+                role_labels[f"{role}:{clip_id}"] = {"label_payload_sha256": authoritative["label_payload_sha256"], "binary_label": authoritative[expected_binary[role]]}
+                bridge_digests[f"{role}:{clip_id}"] = str(receipt["receipt_sha256"])
             rows.sort(key=lambda item: str(item["clip_id"]))
             rows_by_role[role] = rows
             row_digests[role] = sha256_bytes(canonical_json(rows))
@@ -427,18 +521,19 @@ class GoldsetStore:
         if not re.fullmatch(r"[0-9a-fA-F]{40,64}", _text(code_commit)) or not _text(profile_id):
             raise ValueError("profile_id and a real code commit are required")
         payload = {
-            "schema": "hidden-evaluation-finalization-v1", "receipt_id": receipt["receipt_id"],
-            "receipt_sha256": receipt["receipt_sha256"], "run_id": _text(run_id),
+            "schema": "hidden-evaluation-finalization-v1", "receipt_id": hidden_receipt["receipt_id"],
+            "receipt_sha256": hidden_receipt["receipt_sha256"], "run_id": _text(run_id),
             "profile_id": _text(profile_id), "code_commit": _text(code_commit).lower(),
             "sealed_clip_ids": sorted(sealed), "sealed_audio_sha256": {key: sealed[key]["audio_sha256"] for key in sorted(sealed)},
             "role_row_sha256": row_digests, "hidden_jsonl_sha256": dict(hidden_jsonl_hashes),
             "hidden_report_sha256": dict(hidden_report_hashes),
+            "authoritative_labels": role_labels, "bridge_receipts": bridge_digests,
             "role_report_run_ids": {role: str(role_hidden_reports[role]["run_id"]) for role in roles},
         }
         finalization_sha = sha256_bytes(canonical_json(payload))
         finalization = {**payload, "finalization_id": f"hidden-final-{finalization_sha[:16]}", "finalization_sha256": finalization_sha}
         try:
-            self._db.execute("INSERT INTO hidden_finalizations VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (finalization["finalization_id"], receipt["receipt_id"], _text(run_id), _text(profile_id), _text(code_commit).lower(), canonical_json(finalization), finalization_sha))
+            self._db.execute("INSERT INTO hidden_finalizations VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)", (finalization["finalization_id"], hidden_receipt["receipt_id"], _text(run_id), _text(profile_id), _text(code_commit).lower(), canonical_json(finalization), finalization_sha))
         except sqlite3.IntegrityError as exc:
             raise ValueError("this hidden evaluation run has already been finalized") from exc
         self._db.commit()
