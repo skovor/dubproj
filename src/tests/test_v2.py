@@ -171,6 +171,14 @@ class V2QATests(unittest.TestCase):
             passed = evaluate_candidate_v2(str(path), expected_text="Hallo dort", source_text="Hello there", target_sample_rate=24000, target_frames=2400, transcript="Hallo dort", language="de", language_probability=.99)
             self.assertTrue(passed.passed)
 
+    def test_strict_mode_legacy_transcript_is_diagnostic_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._wav(directory)
+            result = evaluate_candidate_v2(str(path), expected_text="Hallo dort", source_text="Hello there", target_sample_rate=24000, target_frames=2400, transcript="Hallo dort", language="de", language_probability=.99, require_structured_linguistic_evidence=True)
+            self.assertFalse(result.passed)
+            self.assertEqual(result.failure_class.value, "ASR_UNCERTAIN")
+            self.assertEqual(result.diagnostics["legacy_linguistic_evidence"]["status"], "HUMAN_REVIEW")
+
     def test_unicode_normalization_keeps_german_content_deterministic(self):
         self.assertEqual(ordered_content("Für nächste", "FÜR NÄCHSTE")[0], True)
         self.assertEqual(ordered_content("Für nächste", "Fuer naechste")[0], False)

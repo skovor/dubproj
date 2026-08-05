@@ -26,4 +26,5 @@ where = ["."]
 include = ["dubbing_pipeline*", "adapters*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "ported"]
+markers = ["historical: optional tests requiring an external OmniVoice/P3R asset checkout"]

@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
-
-from anime_contract import contextual_final_word_gate, line_contract_hash
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent
 MAP = ROOT / "P3R_ANIME_VISUAL_DUB_20260801" / "maps_delivery_aligned_v3_codex2" / "100_030_M_map.json"
 CONFIG = ROOT.parent / "OmniVoice-clean-0.2.1" / "persona_project" / "production_config.json"
 PRODUCER = CONFIG.parent / "scripts" / "produce_anime_scene.py"
+pytestmark = pytest.mark.historical
+if os.environ.get("DUBPROJ_RUN_HISTORICAL") != "1" or not MAP.is_file() or not CONFIG.is_file() or not PRODUCER.is_file():
+    pytest.skip("historical P3R assets are opt-in and unavailable", allow_module_level=True)
+
+from anime_contract import contextual_final_word_gate, line_contract_hash
 
 
 def _inputs() -> tuple[dict, dict, dict]:

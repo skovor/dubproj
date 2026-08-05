@@ -126,6 +126,7 @@ def _calibration_kwargs(config: Any, alignment_backend: Any, *, performance_mode
         "models_lock_sha256": sha256_file(models_lock) if models_lock is not None and Path(models_lock).is_file() else None,
         "expected_code_commit": getattr(config.qa, "expected_calibration_code_commit", None),
         "require_promotion_receipt": bool(getattr(config.qa, "require_promotion_receipt", False) or not getattr(config, "lab_mode", True)),
+        "require_structured_linguistic_evidence": bool(getattr(config.qa, "require_structured_linguistic_evidence", False) or not getattr(config, "lab_mode", True)),
         "model_id": str(getattr(alignment_backend, "model_id", "unknown")) if alignment_backend is not None else None,
         "model_revision": str(getattr(alignment_backend, "model_revision", "unknown")) if alignment_backend is not None else None,
         "performance_mode": str(performance_mode or getattr(config.qa, "performance_mode", "NEUTRAL")),
@@ -436,7 +437,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
             require_asr=True,
             linguistic_evidence=evidence.to_dict() if evidence is not None else None,
-            performance_mode=performance.mode.value,
+            **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
         )
         raw_audits[candidate.candidate_id] = audit
         return _result_or_failed(audit)
@@ -577,7 +578,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                     require_asr=True,
                     linguistic_evidence=processed_evidence.to_dict() if processed_evidence is not None else None,
-                    performance_mode=performance.mode.value,
+                    **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                 )
                 if not _audit_can_escalate(processed_audit):
                     stage_rows.append({"raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None})
@@ -618,7 +619,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         preserved_ok=mount_metrics.preserved_hash_before == mount_metrics.preserved_hash_after,
                         require_asr=True,
                         linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence is not None else None,
-                        performance_mode=performance.mode.value,
+                        **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                     )
                     protected_ok, untouched_ok, _integrity = _scene_integrity(source_array, mounted_array, [line], scene, stem_rate)
                     stage_counts["SERIALIZED_QA"] += 1
@@ -665,7 +666,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
                         linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence is not None else None,
-                        performance_mode=performance.mode.value,
+                        **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                     )
                     stage_counts["SERIALIZED_QA"] += 1
                     # SERIALIZED_QA reopens the exact mounted artifact.  The
@@ -699,6 +700,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
                         linguistic_evidence=serialized_evidence.to_dict() if serialized_evidence is not None else None,
+                        **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
                     )
                     mount_metrics = None
                 options.append({

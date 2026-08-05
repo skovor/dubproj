@@ -1225,6 +1225,7 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                            performance_mode: str | None = None,
                            expected_code_commit: str | None = None,
                            require_promotion_receipt: bool = False,
+                           require_structured_linguistic_evidence: bool = False,
                            performance_max_duration_error_ms: float | None = None) -> QAResultV2:
     profile = profile or LanguageProfile()
     gates: dict[str, GateEvidence] = {}
@@ -1402,11 +1403,20 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
     failures = [name for name in required if not gate_passes(gates.get(name, _gate(name, GateStatus.NOT_RUN)), allow_not_applicable=True)]
     # NOT_RUN is never silently accepted when it was a required gate.
     passed = not failures and all(gates[name].status is not GateStatus.NOT_RUN for name in required)
+    legacy_evidence_blocked = bool(require_structured_linguistic_evidence and lexical_decision is None and lexical_ready)
+    if legacy_evidence_blocked:
+        diagnostics["legacy_linguistic_evidence"] = {"status": "HUMAN_REVIEW", "reason": "structured forced/automatic evidence is required in strict mode"}
+        gates["content"] = _gate("content", GateStatus.FAIL, details={"reason": "STRUCTURED_LINGUISTIC_EVIDENCE_REQUIRED"})
+        gates["final_word"] = _gate("final_word", GateStatus.FAIL, details={"reason": "STRUCTURED_LINGUISTIC_EVIDENCE_REQUIRED"})
+        gates["source_language"] = _gate("source_language", GateStatus.FAIL, details={"reason": "STRUCTURED_LINGUISTIC_EVIDENCE_REQUIRED"})
+        passed = False
     if lexical_decision is not None and lexical_decision.status not in {"PASS_CONFIRMED", "PASS_PHONETIC"}:
         # Uncertainty is a hold/review state, never an implicit PASS and never
         # a reason for the cohort scheduler to regenerate the line.
         passed = False
-    if lexical_decision is not None and lexical_decision.status == "BLOCKED":
+    if legacy_evidence_blocked:
+        failure = FailureClass.ASR_UNCERTAIN
+    elif lexical_decision is not None and lexical_decision.status == "BLOCKED":
         failure = FailureClass.DETERMINISTIC_CALIBRATION
     elif lexical_decision is not None and lexical_decision.status in {
         "ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED",

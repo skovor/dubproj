@@ -42,6 +42,7 @@ class QAConfig:
     calibration_profile_root: Path | None = None
     expected_calibration_code_commit: str | None = None
     require_promotion_receipt: bool = False
+    require_structured_linguistic_evidence: bool = False
     performance_mode: str = "UNRESOLVED"
     english_markers: list[str] = field(default_factory=lambda: [
         "the", "you", "what", "why", "yes", "no", "not", "are", "is",

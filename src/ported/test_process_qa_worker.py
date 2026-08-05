@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import re
+import os
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
+import pytest
+
+ROOT = Path(__file__).resolve().parent
+PERSONA = ROOT.parent / "OmniVoice-clean-0.2.1" / "persona_project"
+pytestmark = pytest.mark.historical
+if os.environ.get("DUBPROJ_RUN_HISTORICAL") != "1" or not (PERSONA / "scripts" / "generate_p3r_cinematic_assets_v021.py").is_file():
+    pytest.skip("historical OmniVoice/P3R assets are opt-in and unavailable", allow_module_level=True)
 
 import generate_p3r_cinematic_assets_v021 as base
 import generate_p3r_cinematic_assets_v021_rounds as rounds

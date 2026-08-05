@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parent
 PERSONA = ROOT.parent / "OmniVoice-clean-0.2.1" / "persona_project"
 SCRIPTS = PERSONA / "scripts"
+pytestmark = pytest.mark.historical
+if os.environ.get("DUBPROJ_RUN_HISTORICAL") != "1" or not (SCRIPTS / "produce_anime_scene.py").is_file():
+    pytest.skip("historical OmniVoice/P3R assets are opt-in and unavailable", allow_module_level=True)
 for path in (ROOT, SCRIPTS):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
