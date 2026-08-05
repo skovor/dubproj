@@ -37,16 +37,16 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
     lid_artifact = root / "lid_calibrator.json"
     runtime_lock = root / "runtime.lock"
     models_lock = root / "models.lock"
-    target_features = ["target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score", "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio", "characters_per_second", "words_per_second", "duration", "performance_mode"]
+    target_features = ["target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score", "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio", "characters_per_second", "words_per_second", "duration", "performance_mode_unresolved", "performance_mode_neutral", "performance_mode_fast", "performance_mode_whisper", "performance_mode_shout", "performance_mode_scream_speech", "performance_mode_crying_speech", "performance_mode_effort", "performance_mode_laugh_speech"]
     final_features = ["final_coverage", "final_minimum_score", "final_mean_score", "final_duration", "gap_to_active_speech_end_ms", "final_delete_count", "final_substitute_count", "insertions_inside_anchor", "final_interpolated"]
     normalization = [{"mean": 0.0, "scale": 1.0} for _ in target_features]
     final_normalization = [{"mean": 0.0, "scale": 1.0} for _ in final_features]
     artifact.write_text(json.dumps({
         "schema": "platt-calibrator-v1",
-        "feature_schema_version": "char-alignment-v2",
+        "feature_schema_version": "char-alignment-v3",
         "normalization_version": "alignment-text-normalization-v2",
         "features": target_features,
-        "coefficients": [1.2, .8, .7, .7, .4, -1.0, -1.0, -1.0, -1.0, -.3, 0.0, 0.0, 0.0, 0.0],
+        "coefficients": [1.2, .8, .7, .7, .4, -1.0, -1.0, -1.0, -1.0, -.3, 0.0, 0.0, 0.0] + [0.0] * (len(target_features) - 13),
         "intercept": -1.1,
         "normalization": normalization,
     }), encoding="utf-8")
@@ -54,10 +54,10 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
         "schema": "platt-calibrator-v1", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v2",
         "features": final_features, "coefficients": [1.2, .8, .7, .7, -.01, -1.0, -1.0, -1.0, -1.0], "intercept": -1.1, "normalization": final_normalization,
     }), encoding="utf-8")
-    lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode"]
+    lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode_unresolved", "performance_mode_neutral", "performance_mode_fast", "performance_mode_whisper", "performance_mode_shout", "performance_mode_scream_speech", "performance_mode_crying_speech", "performance_mode_effort", "performance_mode_laugh_speech"]
     lid_artifact.write_text(json.dumps({
-        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v2", "normalization_version": "alignment-text-normalization-v2",
-        "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0], "intercept": 0.0,
+        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v3", "normalization_version": "alignment-text-normalization-v2",
+        "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0] + [0.0] * (len(lid_features) - 8), "intercept": 0.0,
         "normalization": [{"mean": 0.0, "scale": 1.0} for _ in lid_features],
     }), encoding="utf-8")
     runtime_lock.write_bytes(b"runtime-lock-for-test")
@@ -71,7 +71,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "backend_id": "fake-ctc",
             "model_id": "fake-german",
             "model_revision": model_revision,
-            "feature_schema_version": "char-alignment-v2",
+            "feature_schema_version": "char-alignment-v3",
             "target_language": "de",
             "source_language": "en",
         "performance_modes": ["NEUTRAL", "UNRESOLVED"],
@@ -83,9 +83,9 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "source_lid_probability": .70,
         },
         "calibrators": {
-        "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v2", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
+        "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v3", "normalization_version": "alignment-text-normalization-v2", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
         "final_anchor": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v2", "feature_names": final_features, "artifact_path": str(final_artifact), "artifact_sha256": sha256_file(final_artifact)},
-        "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v2", "normalization_version": "alignment-text-normalization-v2", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
+        "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v3", "normalization_version": "alignment-text-normalization-v2", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
         },
         "dataset": {
             "manifest_sha256": "a" * 64,
@@ -385,7 +385,7 @@ class V2QATests(unittest.TestCase):
             artifact = load_safe_calibrator(
                 root / "target_calibrator.json",
                 profile["calibrators"]["target"]["artifact_sha256"],
-                "char-alignment-v2",
+                "char-alignment-v3",
             )
             vector = {name: 0.0 for name in artifact["features"]}
             self.assertGreaterEqual(predict_probability(artifact, vector), 0.0)
@@ -396,6 +396,13 @@ class V2QATests(unittest.TestCase):
             broken["coefficients"] = [float("nan")] + list(artifact["coefficients"])[1:]
             with self.assertRaises(ValueError):
                 predict_probability(broken, vector)
+
+    def test_previous_ordinal_calibrator_schema_is_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile, _runtime_lock, _models_lock = _validated_profile(root)
+            with self.assertRaises(ValueError):
+                load_safe_calibrator(root / "target_calibrator.json", profile["calibrators"]["target"]["artifact_sha256"], "char-alignment-v2")
 
     def test_alignment_normalization_is_versioned_and_shared(self):
         self.assertEqual(normalize_alignment_text("geht\u2019s"), normalize_alignment_text("geht's"))
@@ -839,6 +846,27 @@ class V2SchedulerTests(unittest.TestCase):
             self.assertTrue(report["qa_routes"]["L1"])
             self.assertTrue(report["model_pool"]["loaded"])
             self.assertTrue((root / "out" / "S" / "state").exists())
+
+    def test_run_scene_enforces_declared_performance_duration(self):
+        import soundfile as sf
+        class Backend:
+            def generate_batch(self, payload):
+                audio = np.zeros(24000, dtype="float32"); audio[100:23000] = .05
+                return [audio for _ in payload]
+        class ASR:
+            def transcribe(self, _path, *, language=None): return {"text": "Hallo", "language": "de", "probability": .99}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); ref = root / "ref.wav"; stem = root / "stem.wav"
+            sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
+            sf.write(stem, np.zeros((24000, 2), dtype="float32"), 24000)
+            qa, runtime_lock, models_lock = self._calibrated_qa(root)
+            qa.performance_mode = "FAST"
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=1, retry_takes=0, qa=qa, runtime_lock=runtime_lock, models_lock=models_lock)
+            line = Line("L1", "A", "Hello", "Hallo", 0, .5, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True)
+            report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=self.FakeCTC())
+            self.assertFalse(report["pass"])
+            stages = report["lines"][0]["candidate_stages"]
+            self.assertTrue(any((stage.get("processed") or {}).get("gates", {}).get("performance_duration", {}).get("status") == "FAIL" for stage in stages))
 
     def test_mfa_is_invoked_only_when_cost_route_requests_it(self):
         import soundfile as sf

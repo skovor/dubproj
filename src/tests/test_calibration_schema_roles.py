@@ -15,7 +15,7 @@ class CalibrationSchemaRoleTests(unittest.TestCase):
     def _profile(self, root: Path) -> dict:
         def artifact(schema: str, name: str) -> dict:
             path = root / name
-            features = list(_FINAL_ANCHOR_FEATURES if schema == "final-anchor-v1" else (_LID_FEATURES if schema == "lid-fusion-v2" else _CALIBRATOR_FEATURES))
+            features = list(_FINAL_ANCHOR_FEATURES if schema == "final-anchor-v1" else (_LID_FEATURES if schema == "lid-fusion-v3" else _CALIBRATOR_FEATURES))
             path.write_text(json.dumps({"schema": "platt-calibrator-v1", "feature_schema_version": schema, "normalization_version": "alignment-text-normalization-v2", "features": features, "coefficients": [1.0] * len(features), "intercept": 0.0, "normalization": [{"mean": 0.0, "scale": 1.0} for _ in features]}), encoding="utf-8")
             return {
                 "type": "platt", "engine": "builtin", "format": "json",
@@ -25,9 +25,9 @@ class CalibrationSchemaRoleTests(unittest.TestCase):
             }
         return {
             "schema": "generic-dubbing-alignment-calibration-profile-v2", "status": "VALIDATED", "authority": True,
-            "profile_id": "schema-test", "identity": {"backend_id": "b", "model_id": "m", "model_revision": "r", "feature_schema_version": "char-alignment-v2", "target_language": "de", "source_language": "en", "performance_modes": ["NEUTRAL"]},
+            "profile_id": "schema-test", "identity": {"backend_id": "b", "model_id": "m", "model_revision": "r", "feature_schema_version": "char-alignment-v3", "target_language": "de", "source_language": "en", "performance_modes": ["NEUTRAL"]},
             "thresholds": {"target_pass_probability": .8, "target_failure_probability": .2, "final_anchor_pass_probability": .8, "source_lid_probability": .8},
-            "calibrators": {"target": artifact("char-alignment-v2", "target.json"), "final_anchor": artifact("final-anchor-v1", "anchor.json"), "lid": artifact("lid-fusion-v2", "lid.json")},
+            "calibrators": {"target": artifact("char-alignment-v3", "target.json"), "final_anchor": artifact("final-anchor-v1", "anchor.json"), "lid": artifact("lid-fusion-v3", "lid.json")},
             "dataset": {"manifest_sha256": "0" * 64, "labels_sha256": "1" * 64, "split_manifest_sha256": "2" * 64, "calibration_count": 2, "validation_count": 2, "hidden_test_count": 2},
             "metrics": {"hidden_false_pass_count": 0, "hidden_false_fail_count": 0, "brier_score": .1, "expected_calibration_error": .1},
             "provenance": {"code_commit": "a" * 40, "runtime_lock_sha256": "3" * 64, "models_lock_sha256": "4" * 64, "created_at": "2025-01-01T00:00:00Z"},

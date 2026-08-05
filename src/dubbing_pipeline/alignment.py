@@ -87,7 +87,7 @@ class AlignmentCache:
     backend_id: str = "unknown"
     model_id: str = "unknown"
     model_revision: str = "unknown"
-    feature_schema_version: str = "char-alignment-v2"
+    feature_schema_version: str = "char-alignment-v3"
     normalization_version: str = TEXT_NORMALIZATION_POLICY_VERSION
 
     def _key(self, audio_sha256: str, text: str, language: str) -> str:

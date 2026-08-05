@@ -20,7 +20,7 @@ _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 _CALIBRATOR_SCHEMA = "platt-calibrator-v1"
 _CALIBRATOR_ENGINE = "builtin"
 _CALIBRATOR_FORMAT = "json"
-_FEATURE_SCHEMA_VERSION = "char-alignment-v2"
+_FEATURE_SCHEMA_VERSION = "char-alignment-v3"
 _NORMALIZATION_VERSION = "alignment-text-normalization-v2"
 _CALIBRATOR_FEATURES = (
     "target_score",
@@ -36,26 +36,24 @@ _CALIBRATOR_FEATURES = (
     "characters_per_second",
     "words_per_second",
     "duration",
-    "performance_mode",
+    "performance_mode_unresolved",
+    "performance_mode_neutral",
+    "performance_mode_fast",
+    "performance_mode_whisper",
+    "performance_mode_shout",
+    "performance_mode_scream_speech",
+    "performance_mode_crying_speech",
+    "performance_mode_effort",
+    "performance_mode_laugh_speech",
 )
 _FINAL_ANCHOR_FEATURES = (
     "final_coverage", "final_minimum_score", "final_mean_score", "final_duration",
     "gap_to_active_speech_end_ms", "final_delete_count", "final_substitute_count",
     "insertions_inside_anchor", "final_interpolated",
 )
-_LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v2"
-_LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode")
-_PERFORMANCE_MODE_CODES = {
-    "NEUTRAL": 0.0,
-    "FAST": 1.0,
-    "WHISPER": 2.0,
-    "SHOUT": 3.0,
-    "SCREAM_SPEECH": 4.0,
-    "CRYING_SPEECH": 5.0,
-    "EFFORT": 6.0,
-    "LAUGH_SPEECH": 7.0,
-    "UNRESOLVED": 8.0,
-}
+_LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v3"
+_LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode_unresolved", "performance_mode_neutral", "performance_mode_fast", "performance_mode_whisper", "performance_mode_shout", "performance_mode_scream_speech", "performance_mode_crying_speech", "performance_mode_effort", "performance_mode_laugh_speech")
+_PERFORMANCE_MODES = ("UNRESOLVED", "NEUTRAL", "FAST", "WHISPER", "SHOUT", "SCREAM_SPEECH", "CRYING_SPEECH", "EFFORT", "LAUGH_SPEECH")
 
 
 def fold(text: str) -> str:
@@ -553,8 +551,11 @@ def _alignment_feature_vector(
         "characters_per_second": alignment_target.get("characters_per_second"),
         "words_per_second": alignment_target.get("words_per_second"),
         "duration": alignment_target.get("duration"),
-        "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper()),
     }
+    selected_mode = str(performance_mode or "UNRESOLVED").upper()
+    if selected_mode not in _PERFORMANCE_MODES:
+        selected_mode = "UNRESOLVED"
+    values.update({f"performance_mode_{mode.lower()}": 1.0 if mode == selected_mode else 0.0 for mode in _PERFORMANCE_MODES})
     try:
         result = {key: float(values[key]) for key in _CALIBRATOR_FEATURES}
     except (KeyError, TypeError, ValueError):
@@ -826,8 +827,11 @@ def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, source_langua
             "ctc_target_calibrated_probability": float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else 0.0),
             "duration_seconds": float(lid_evidence.get("duration_seconds", lid_evidence.get("duration", 0.0))),
             "speech_ratio": float(lid_evidence.get("speech_ratio", 0.0)),
-            "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper(), 0.0),
         }
+        selected_mode = str(performance_mode or "UNRESOLVED").upper()
+        if selected_mode not in _PERFORMANCE_MODES:
+            selected_mode = "UNRESOLVED"
+        values.update({f"performance_mode_{mode.lower()}": 1.0 if mode == selected_mode else 0.0 for mode in _PERFORMANCE_MODES})
     except (TypeError, ValueError):
         return None
     return values if all(math.isfinite(value) for value in values.values()) else None

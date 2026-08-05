@@ -32,7 +32,7 @@ from .scheduler import run_cohorts
 from .scheduler import route_qa
 from .fmv_selector import select_local_scene
 from .scene_qa import build_candidate_matrix
-from .performance import PerformanceEvidence, classify_performance
+from .performance import PerformanceEvidence, classify_performance, measure_audio
 from .performance_policy import policy_for
 from .model_pool import ModelIdentity, ModelPool
 from .state import StateStore
@@ -120,7 +120,7 @@ def _calibration_kwargs(config: Any, alignment_backend: Any, *, performance_mode
         "calibration_authority": bool(getattr(config.qa, "calibration_authority", False)),
         "calibration_profile": getattr(config.qa, "calibration_profile", None),
         "calibration_profile_root": getattr(config.qa, "calibration_profile_root", None),
-        "feature_schema_version": "char-alignment-v2",
+        "feature_schema_version": "char-alignment-v3",
         "backend_id": str(getattr(alignment_backend, "backend_id", "unknown")) if alignment_backend is not None else None,
         "runtime_lock_sha256": sha256_file(runtime_lock) if runtime_lock is not None and Path(runtime_lock).is_file() else None,
         "models_lock_sha256": sha256_file(models_lock) if models_lock is not None and Path(models_lock).is_file() else None,
@@ -144,8 +144,8 @@ def _line_performance(line: Line, config: Any) -> PerformanceEvidence:
     configured_mode = getattr(config.qa, "performance_mode", None)
     if not metadata.get("performance_mode") and configured_mode and str(configured_mode).upper() != "UNRESOLVED":
         metadata["performance_mode"] = configured_mode
-    duration = max(0.0, float(line.end) - float(line.start)) if line.end > line.start else None
-    return classify_performance(metadata=metadata, duration_seconds=duration)
+    # Window duration is a timing constraint, never a performance classifier.
+    return classify_performance(metadata=metadata)
 
 
 def _line_hard_gates(config: Any, performance: PerformanceEvidence) -> list[str]:
@@ -158,6 +158,10 @@ def _line_hard_gates(config: Any, performance: PerformanceEvidence) -> list[str]
         gates = [gate for gate in gates if gate != "final_word"]
     if not policy.require_loudness:
         gates = [gate for gate in gates if gate != "active_loudness"]
+    if "performance_duration" not in gates and policy.max_duration_error_ms is not None:
+        gates.append("performance_duration")
+    # There is no reference pitch contract in the generic scene model yet;
+    # pitch remains measured diagnostic evidence rather than a false hard gate.
     return gates
 
 
@@ -313,6 +317,7 @@ def _stage_bundle(option: dict[str, Any]) -> dict[str, Any]:
         "alignment_status": option.get("alignment_status"),
         "repair_reinserted": bool(option.get("repair_reinserted")),
         "repair_attempt_id": option.get("repair_attempt_id"),
+        "performance": option.get("performance").to_dict() if isinstance(option.get("performance"), PerformanceEvidence) else option.get("performance"),
         "error": option.get("error"),
     }
 
@@ -385,6 +390,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         model_revision=str(getattr(alignment_backend, "model_revision", "unknown")),
     ) if alignment_backend is not None else None
     raw_audits: dict[str, StageAudit] = {}
+    measured_performance_by_candidate: dict[str, PerformanceEvidence] = {}
     line_by_id = {line.id: line for line in lines}
 
     def generate(items: list[Line], round_index: int):
@@ -396,7 +402,9 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
 
     def evaluate(candidate):
         line = line_by_id[candidate.line_id]
-        performance = performance_by_line[line.id]
+        declared_performance = performance_by_line[line.id]
+        performance = measure_audio(candidate.raw_audio, declared=declared_performance)
+        measured_performance_by_candidate[candidate.candidate_id] = performance
         evidence = _transcribe_evidence(
             asr,
             candidate.raw_audio,
@@ -444,7 +452,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         "raw_retry_ids": list(cohort.retry_ids),
         "phases": list(cohort.phases),
         "stage_evidence": {},
-        "performance_by_line": {line_id: evidence.to_dict() for line_id, evidence in performance_by_line.items()},
+        "performance_by_line": {line_id: {**evidence.to_dict(), "declared": evidence.to_dict(), "measured_candidates": {}} for line_id, evidence in performance_by_line.items()},
         "qa_routes": {},
         "model_pool": {},
         "repair_attempts": [],
@@ -499,8 +507,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     row_by_id: dict[str, dict[str, Any]] = {}
     for line in scene.lines:
         decision = classify_line(line, append_ellipsis_experiment=config.append_ellipsis_experiment)
-        performance = performance_by_line[line.id]
-        row: dict[str, Any] = {"id": line.id, "policy": decision.policy, "policy_reason": decision.reason, "performance": performance.to_dict(), "stages": {}}
+        declared_performance = performance_by_line[line.id]
+        row: dict[str, Any] = {"id": line.id, "policy": decision.policy, "policy_reason": decision.reason, "performance": declared_performance.to_dict(), "stages": {}}
         row_by_id[line.id] = row
         if decision.policy in {KEEP_ORIGINAL, BLOCKED}:
             row["status"] = decision.policy
@@ -515,9 +523,13 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             audit = raw_audits.get(candidate.candidate_id)
             if audit is not None:
                 raw_rows.append(audit.to_dict())
+                measured = measured_performance_by_candidate.get(candidate.candidate_id)
+                if measured is not None:
+                    report["performance_by_line"][line.id]["measured_candidates"][candidate.candidate_id] = measured.to_dict()
         row["stages"]["RAW_TECHNICAL_QA"] = raw_rows
         options: list[dict[str, Any]] = []
         for candidate, raw_result in evaluations:
+            performance = measured_performance_by_candidate.get(candidate.candidate_id, performance_by_line[line.id])
             raw_audit = raw_audits.get(candidate.candidate_id)
             if raw_audit is None or not _audit_can_escalate(raw_audit):
                 continue
@@ -621,7 +633,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     )
                 else:
                     mounted_path = persist_audio_atomic(candidate_root / "mounted.wav", read(processed_path, always_2d=True)[0], target_rate)
-                    delivery_clip, clip_frames = read(mounted_path, always_2d=True)
+                    delivery_clip, mounted_rate = read(mounted_path, always_2d=True)
+                    clip_frames = len(delivery_clip)
                     mounted_evidence = _transcribe_evidence(
                         asr,
                         mounted_path,
@@ -699,6 +712,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     "mount_metrics": mount_metrics,
                     "processing_hash": processed.processing_hash,
                     "eligible": False,
+                    "performance": performance,
                 })
                 stage_rows.append(options[-1])
             except Exception as exc:
@@ -716,7 +730,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         repaired = repaired_candidate(outcome, line_id=line.id)
         if repaired is None:
             return None
-        performance = performance_by_line[line.id]
+        declared_performance = performance_by_line[line.id]
         target_rate = int(stem_rate or config.sample_rate)
         generation_hash = contract_hash("repair-candidate-v1", {"line_id": line.id, "attempt_id": repaired.attempt_id, "output_audio_sha256": repaired.output_audio_sha256})
         candidate = CandidateArtifact(
@@ -727,6 +741,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         )
         candidate_root = out / "repair_candidates" / _safe_name(line.id) / _safe_name(repaired.attempt_id[:16])
         try:
+            performance = measure_audio(repaired.output_audio_path, declared=declared_performance)
+            report["performance_by_line"][line.id]["measured_candidates"][candidate.candidate_id] = performance.to_dict()
             raw_evidence = _transcribe_evidence(asr, repaired.output_audio_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
             raw_audio, raw_rate = read(repaired.output_audio_path, always_2d=True)
             raw_audit = audit_candidate_stage(
@@ -760,7 +776,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
             )
             if not _audit_can_escalate(processed_audit):
-                return {"candidate": candidate, "raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None, "processed_path": str(processed_path), "mounted_path": None, "mount_metrics": None, "processing_hash": processed.processing_hash, "eligible": False, "repair_attempt_id": repaired.attempt_id, "repair_reinserted": True}
+                return {"candidate": candidate, "raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None, "processed_path": str(processed_path), "mounted_path": None, "mount_metrics": None, "processing_hash": processed.processing_hash, "eligible": False, "repair_attempt_id": repaired.attempt_id, "repair_reinserted": True, "performance": performance}
             if scene.topology == "EMBEDDED_FMV":
                 window = _line_window(line, stem_rate, scene.id, scene.dialogue_channel)
                 mounted_array, mount_metrics = mount_surgical(source_array, read(processed_path, always_2d=True)[0], target_rate, window, stem_rate, empalme_b=bool(line.preserved_source_intervals or line.source_resume is not None))
@@ -775,7 +791,8 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 serialized_audit = audit_scene_stage(mounted_path, stage="SERIALIZED_QA", expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok)
             else:
                 mounted_path = persist_audio_atomic(candidate_root / "mounted.wav", read(processed_path, always_2d=True)[0], target_rate)
-                delivery_clip, clip_frames = read(mounted_path, always_2d=True)
+                delivery_clip, mounted_rate = read(mounted_path, always_2d=True)
+                clip_frames = len(delivery_clip)
                 mounted_evidence = _transcribe_evidence(asr, mounted_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
                 stage_counts["MOUNTED_QA"] += 1
                 mounted_audit = audit_candidate_stage(mounted_path, stage="MOUNTED_QA", expected_text=line.effective_target_text, source_text=line.source_text, target_sample_rate=target_rate, target_frames=len(delivery_clip), channels=int(delivery_clip.shape[1]), reference_end=len(delivery_clip) / target_rate, profile=profile, hard_gates=_line_hard_gates(config, performance), final_word_min_tokens=config.qa.final_word_min_tokens, tail_guard_seconds=config.qa.tail_guard_ms / 1000.0, require_asr=True, linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence else None, **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value))
@@ -784,7 +801,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 serialized_audit = audit_candidate_stage(mounted_path, stage="SERIALIZED_QA", expected_text=line.effective_target_text, source_text=line.source_text, target_sample_rate=target_rate, target_frames=len(delivery_clip), channels=int(delivery_clip.shape[1]), reference_end=len(delivery_clip) / target_rate, profile=profile, hard_gates=_line_hard_gates(config, performance), final_word_min_tokens=config.qa.final_word_min_tokens, tail_guard_seconds=config.qa.tail_guard_ms / 1000.0, require_asr=True, linguistic_evidence=serialized_evidence.to_dict() if serialized_evidence else None, **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value))
                 mount_metrics = None
             candidate = CandidateArtifact(**{**candidate.__dict__, "mounted_delivery": str(mounted_path)})
-            return {"candidate": candidate, "raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": mounted_audit, "serialized_audit": serialized_audit, "processed_path": str(processed_path), "mounted_path": str(mounted_path), "mount_metrics": mount_metrics, "processing_hash": processed.processing_hash, "eligible": False, "repair_attempt_id": repaired.attempt_id, "repair_reinserted": True}
+            return {"candidate": candidate, "raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": mounted_audit, "serialized_audit": serialized_audit, "processed_path": str(processed_path), "mounted_path": str(mounted_path), "mount_metrics": mount_metrics, "processing_hash": processed.processing_hash, "eligible": False, "repair_attempt_id": repaired.attempt_id, "repair_reinserted": True, "performance": performance}
         except Exception as exc:
             report["repair_attempts"].append({"line_id": line.id, "attempt_id": repaired.attempt_id, "outcome": "REPAIR_REINSERT_QA_ERROR", "error": str(exc)})
             return None
@@ -817,13 +834,14 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         row = row_by_id.get(line.id)
         if row is None or not options:
             continue
-        performance = performance_by_line[line.id]
+        declared_performance = performance_by_line[line.id]
         provisional = [option for option in options if _audit_can_escalate(option.get("mounted_audit"))]
         provisional.sort(key=lambda option: rank_provisional_v2(option["mounted_audit"].result), reverse=True)
         for option in provisional:
             option["alignment_status"] = "NOT_SELECTED"
         for option in provisional:
             option["alignment_status"] = "ALIGNMENT_PENDING"
+            performance = option.get("performance", declared_performance)
             mounted_audit = option["mounted_audit"]
             provisional_status = linguistic_status(mounted_audit.result) or "ASR_UNCERTAIN"
             qa_route = route_qa(

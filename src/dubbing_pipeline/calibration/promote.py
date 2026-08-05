@@ -31,7 +31,7 @@ def _artifact_spec(value: Mapping[str, Any], role: str, identity: Mapping[str, A
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise PromotionError(f"{role} artifact is not valid JSON") from exc
-    expected_schema = "final-anchor-v1" if role == "final_anchor" else ("lid-fusion-v2" if role == "lid" else str(identity.get("feature_schema_version", "char-alignment-v2")))
+    expected_schema = "final-anchor-v1" if role == "final_anchor" else ("lid-fusion-v3" if role == "lid" else str(identity.get("feature_schema_version", "char-alignment-v3")))
     if payload.get("schema") != "platt-calibrator-v1" or payload.get("feature_schema_version") != expected_schema or payload.get("status", "DRAFT") not in {"DRAFT", "VALIDATED"}:
         raise PromotionError(f"{role} artifact schema/status mismatch")
     features = list(payload.get("features") or [])

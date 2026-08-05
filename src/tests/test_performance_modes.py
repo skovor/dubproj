@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 import numpy as np
 import soundfile as sf
-from dubbing_pipeline.performance import PerformanceContract, PerformanceMode, classify_performance, extract_basic_features
+from dubbing_pipeline.performance import PerformanceContract, PerformanceMode, classify_performance, extract_basic_features, measure_audio
 from dubbing_pipeline.performance_policy import policy_for
 from dubbing_pipeline.qa_v2 import evaluate_candidate_v2
 
@@ -22,6 +22,26 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(result.mode, PerformanceMode.UNRESOLVED)
         self.assertEqual(result.confidence, 0.0)
         self.assertEqual(policy_for(PerformanceMode.UNRESOLVED).notes, "performance unresolved; retain lexical gates and block promotion")
+
+    def test_short_window_does_not_infer_fast(self):
+        self.assertEqual(classify_performance(metadata={}, duration_seconds=.20).mode, PerformanceMode.UNRESOLVED)
+
+    def test_measured_audio_is_separate_from_declared_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "voiced.wav"
+            samples = .2 * np.sin(2 * np.pi * 180 * np.arange(24000) / 24000).astype("float32")
+            sf.write(path, samples, 24000)
+            evidence = measure_audio(path, declared=classify_performance(metadata={"performance_mode": "FAST"}))
+            self.assertEqual(evidence.mode, PerformanceMode.FAST)
+            self.assertEqual(evidence.declared_mode, "FAST")
+            self.assertTrue(evidence.measured)
+            self.assertGreater(evidence.pitch_hz or 0.0, 100.0)
+            self.assertGreater(evidence.speech_ratio or 0.0, .9)
+
+    def test_noise_does_not_become_effort_without_explicit_metadata(self):
+        rng = np.random.default_rng(12)
+        result = classify_performance(metadata={}, rms_dbfs=-20.0, pitch_hz=None, speech_ratio=1.0, duration_seconds=1.0)
+        self.assertEqual(result.mode, PerformanceMode.UNRESOLVED)
 
     def test_duration_policy_is_executed_as_a_gate(self):
         with tempfile.TemporaryDirectory() as tmp:

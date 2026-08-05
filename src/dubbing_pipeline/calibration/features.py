@@ -3,13 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-FEATURE_SCHEMA_VERSION = "char-alignment-v2"
+FEATURE_SCHEMA_VERSION = "char-alignment-v3"
 NORMALIZATION_VERSION = "alignment-text-normalization-v2"
+PERFORMANCE_MODES = ("UNRESOLVED", "NEUTRAL", "FAST", "WHISPER", "SHOUT", "SCREAM_SPEECH", "CRYING_SPEECH", "EFFORT", "LAUGH_SPEECH")
+PERFORMANCE_MODE_FEATURES = tuple(f"performance_mode_{mode.lower()}" for mode in PERFORMANCE_MODES)
 TARGET_FEATURES = (
     "target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score",
     "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio",
-    "characters_per_second", "words_per_second", "duration", "performance_mode",
+    "characters_per_second", "words_per_second", "duration",
 )
+TARGET_FEATURES += PERFORMANCE_MODE_FEATURES
 FINAL_ANCHOR_FEATURES = (
     "final_coverage", "final_minimum_score", "final_mean_score", "final_duration", "gap_to_active_speech_end_ms",
     "final_delete_count", "final_substitute_count", "insertions_inside_anchor", "final_interpolated",
@@ -75,8 +78,8 @@ def target_features(evidence: Mapping[str, Any], *, performance_mode: str = "NEU
         "characters_per_second": _required(evidence, "characters_per_second") if "characters_per_second" in evidence else char_count / duration,
         "words_per_second": _required(evidence, "words_per_second") if "words_per_second" in evidence else word_count / duration,
         "duration": duration,
-        "performance_mode": _performance_code(performance_mode),
     }
+    values.update(_performance_one_hot(performance_mode))
     _finite(values)
     return values
 
@@ -99,8 +102,11 @@ def final_anchor_features(evidence: Mapping[str, Any]) -> dict[str, float]:
     _finite(values); return values
 
 
-def _performance_code(value: str) -> float:
-    return {"UNRESOLVED": 8.0, "NEUTRAL": 0.0, "FAST": 1.0, "WHISPER": 2.0, "SHOUT": 3.0, "SCREAM_SPEECH": 4.0, "CRYING_SPEECH": 5.0, "EFFORT": 6.0, "LAUGH_SPEECH": 7.0}.get(str(value).upper(), 8.0)
+def _performance_one_hot(value: str) -> dict[str, float]:
+    selected = str(value or "UNRESOLVED").upper()
+    if selected not in PERFORMANCE_MODES:
+        selected = "UNRESOLVED"
+    return {name: 1.0 if name == f"performance_mode_{selected.lower()}" else 0.0 for name in PERFORMANCE_MODE_FEATURES}
 
 
 def _finite(values: Mapping[str, float]) -> None:
@@ -108,4 +114,4 @@ def _finite(values: Mapping[str, float]) -> None:
     if not all(math.isfinite(value) for value in values.values()): raise ValueError("non-finite calibration feature")
 
 
-__all__ = ["FEATURE_SCHEMA_VERSION", "NORMALIZATION_VERSION", "TARGET_FEATURES", "FINAL_ANCHOR_FEATURES", "FeatureRow", "target_features", "final_anchor_features"]
+__all__ = ["FEATURE_SCHEMA_VERSION", "NORMALIZATION_VERSION", "PERFORMANCE_MODES", "PERFORMANCE_MODE_FEATURES", "TARGET_FEATURES", "FINAL_ANCHOR_FEATURES", "FeatureRow", "target_features", "final_anchor_features"]

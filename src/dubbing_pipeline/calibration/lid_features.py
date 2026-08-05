@@ -9,8 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Any, Mapping
-LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v2"
-LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode")
+LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v3"
+PERFORMANCE_MODES = ("UNRESOLVED", "NEUTRAL", "FAST", "WHISPER", "SHOUT", "SCREAM_SPEECH", "CRYING_SPEECH", "EFFORT", "LAUGH_SPEECH")
+LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio") + tuple(f"performance_mode_{mode.lower()}" for mode in PERFORMANCE_MODES)
 
 @dataclass(frozen=True)
 class LIDFeatureRow:
@@ -52,8 +53,12 @@ def features(value: Mapping[str, Any], *, performance_mode: str = "NEUTRAL", sou
     calibrated_ctc = value.get("ctc_target_calibrated_probability", 0.0)
     source_code = _language_code(source_language or value.get("source_language") or "en")
     target_code = _language_code(target_language or value.get("target_language") or "de")
-    out = {"lid_source_probability": float(value.get("lid_source_probability", probs.get(source_code, 0.0))), "lid_target_probability": float(value.get("lid_target_probability", probs.get(target_code, 0.0))), "whisper_source_probability": float(value.get("whisper_source_probability", 0.0)), "whisper_target_probability": float(value.get("whisper_target_probability", 0.0)), "ctc_target_raw_score": float(raw_ctc), "ctc_target_calibrated_probability": float(calibrated_ctc), "duration_seconds": float(value.get("duration_seconds", value.get("duration", 0.0))), "speech_ratio": float(value.get("speech_ratio", 0.0)), "performance_mode": {"UNRESOLVED":8.0,"NEUTRAL":0.0,"FAST":1.0,"WHISPER":2.0,"SHOUT":3.0,"SCREAM_SPEECH":4.0,"CRYING_SPEECH":5.0,"EFFORT":6.0,"LAUGH_SPEECH":7.0}.get(str(performance_mode).upper(), 8.0)}
+    selected_mode = str(performance_mode or "UNRESOLVED").upper()
+    if selected_mode not in PERFORMANCE_MODES:
+        selected_mode = "UNRESOLVED"
+    out = {"lid_source_probability": float(value.get("lid_source_probability", probs.get(source_code, 0.0))), "lid_target_probability": float(value.get("lid_target_probability", probs.get(target_code, 0.0))), "whisper_source_probability": float(value.get("whisper_source_probability", 0.0)), "whisper_target_probability": float(value.get("whisper_target_probability", 0.0)), "ctc_target_raw_score": float(raw_ctc), "ctc_target_calibrated_probability": float(calibrated_ctc), "duration_seconds": float(value.get("duration_seconds", value.get("duration", 0.0))), "speech_ratio": float(value.get("speech_ratio", 0.0))}
+    out.update({f"performance_mode_{mode.lower()}": 1.0 if mode == selected_mode else 0.0 for mode in PERFORMANCE_MODES})
     if not all(math.isfinite(v) for v in out.values()): raise ValueError("non-finite LID feature")
     return out
 
-__all__ = ["LID_FEATURE_SCHEMA_VERSION", "LID_FEATURES", "LIDFeatureRow", "features"]
+__all__ = ["LID_FEATURE_SCHEMA_VERSION", "PERFORMANCE_MODES", "LID_FEATURES", "LIDFeatureRow", "features"]
