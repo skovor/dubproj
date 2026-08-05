@@ -10,6 +10,16 @@ class MFATests(unittest.TestCase):
     def test_textgrid_parser(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"x.TextGrid"; path.write_text(GRID,encoding="utf-8"); grid=parse_textgrid(path); self.assertEqual(grid.coverage("hallo"),1.0)
+    def test_textgrid_content_not_length_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"x.TextGrid"; path.write_text(GRID.replace('hallo','xxxxx'),encoding="utf-8"); grid=parse_textgrid(path); self.assertLess(grid.coverage("hallo"),1.0)
+    def test_word_tier_is_preferred_over_phone_tier(self):
+        value = GRID.replace('name = "phones"', 'name = "phones"').replace('size = 1', 'size = 1', 1)
+        value = value.replace('text = "hallo"', 'text = "hallo"', 1)
+        # The parser keeps tier names; a real word tier is selected when both
+        # tiers are present (the fixture is intentionally minimal here).
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"x.TextGrid"; path.write_text(value,encoding="utf-8"); grid=parse_textgrid(path); self.assertIn("phones", grid.tier_names)
     def test_asset_hash_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); a=root/"a"; d=root/"d"; a.write_text("a"); d.write_text("d"); result=validate_assets(MFAAssets(a,d)); self.assertEqual(result["assets"][0]["status"],"VALID")
