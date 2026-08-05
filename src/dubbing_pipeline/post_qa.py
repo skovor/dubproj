@@ -16,6 +16,7 @@ from .audio import read, write
 from .contracts import FailureClass, GateEvidence, GateStatus
 from .hashing import contract_hash, sha256_file
 from .qa_v2 import LanguageProfile, QAResultV2, evaluate_candidate_v2
+from .performance_policy import policy_for
 
 
 POST_TRANSFORM_STAGES = (
@@ -159,6 +160,7 @@ def audit_candidate_stage(
             model_id=model_id,
             model_revision=model_revision,
             performance_mode=performance_mode,
+            performance_max_duration_error_ms=(policy_for(performance_mode).max_duration_error_ms if performance_mode else None),
         )
         artifact_sha = sha256_file(path)
         qa_hash = contract_hash(

@@ -40,7 +40,7 @@ class QAConfig:
     calibration_authority: bool = False
     calibration_profile: dict[str, Any] = field(default_factory=dict)
     calibration_profile_root: Path | None = None
-    performance_mode: str = "NEUTRAL"
+    performance_mode: str = "UNRESOLVED"
     english_markers: list[str] = field(default_factory=lambda: [
         "the", "you", "what", "why", "yes", "no", "not", "are", "is",
         "can", "will", "this", "that", "your", "to", "of", "and",

@@ -53,6 +53,7 @@ _PERFORMANCE_MODE_CODES = {
     "CRYING_SPEECH": 5.0,
     "EFFORT": 6.0,
     "LAUGH_SPEECH": 7.0,
+    "UNRESOLVED": 8.0,
 }
 
 
@@ -1192,7 +1193,8 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
                           models_lock_sha256: str | None = None,
                           model_id: str | None = None,
                           model_revision: str | None = None,
-                          performance_mode: str | None = None) -> QAResultV2:
+                          performance_mode: str | None = None,
+                          performance_max_duration_error_ms: float | None = None) -> QAResultV2:
     profile = profile or LanguageProfile()
     gates: dict[str, GateEvidence] = {}
     diagnostics: dict[str, Any] = {}
@@ -1222,6 +1224,13 @@ def evaluate_candidate_v2(path: str, *, expected_text: str, source_text: str = "
     else:
         end = speech_end(audio, sample_rate); diagnostics["voice_end"] = end
         gates["tail"] = _gate("tail", GateStatus.PASS if end <= reference_end + tail_guard_seconds else GateStatus.FAIL, measured=end, threshold=reference_end + tail_guard_seconds, units="seconds")
+    if performance_max_duration_error_ms is not None and reference_end is not None:
+        actual_end = float(diagnostics.get("voice_end", speech_end(audio, sample_rate)))
+        error_ms = abs(actual_end - float(reference_end)) * 1000.0
+        diagnostics["performance_duration_error_ms"] = error_ms
+        gates["performance_duration"] = _gate("performance_duration", GateStatus.PASS if error_ms <= float(performance_max_duration_error_ms) else GateStatus.FAIL, measured=error_ms, threshold=float(performance_max_duration_error_ms), units="ms")
+    else:
+        gates["performance_duration"] = _gate("performance_duration", GateStatus.NOT_APPLICABLE)
     lexical_decision: LinguisticDecision | None = None
     lexical_ready = bool(transcript and transcript.strip()) or bool(linguistic_evidence)
     if linguistic_evidence:

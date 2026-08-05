@@ -139,8 +139,9 @@ def _line_performance(line: Line, config: Any) -> PerformanceEvidence:
     different speaker or delivery.
     """
     metadata = dict(getattr(line, "metadata", {}) or {})
-    if not metadata.get("performance_mode") and getattr(config.qa, "performance_mode", None):
-        metadata["performance_mode"] = getattr(config.qa, "performance_mode")
+    configured_mode = getattr(config.qa, "performance_mode", None)
+    if not metadata.get("performance_mode") and configured_mode and str(configured_mode).upper() != "UNRESOLVED":
+        metadata["performance_mode"] = configured_mode
     duration = max(0.0, float(line.end) - float(line.start)) if line.end > line.start else None
     return classify_performance(metadata=metadata, duration_seconds=duration)
 
@@ -423,6 +424,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
             require_asr=True,
             linguistic_evidence=evidence.to_dict() if evidence is not None else None,
+            performance_mode=performance.mode.value,
         )
         raw_audits[candidate.candidate_id] = audit
         return _result_or_failed(audit)
@@ -558,6 +560,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                     tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                     require_asr=True,
                     linguistic_evidence=processed_evidence.to_dict() if processed_evidence is not None else None,
+                    performance_mode=performance.mode.value,
                 )
                 if not _audit_can_escalate(processed_audit):
                     stage_rows.append({"raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None})
@@ -598,6 +601,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         preserved_ok=mount_metrics.preserved_hash_before == mount_metrics.preserved_hash_after,
                         require_asr=True,
                         linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence is not None else None,
+                        performance_mode=performance.mode.value,
                     )
                     protected_ok, untouched_ok, _integrity = _scene_integrity(source_array, mounted_array, [line], scene, stem_rate)
                     stage_counts["SERIALIZED_QA"] += 1
@@ -643,6 +647,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
                         require_asr=True,
                         linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence is not None else None,
+                        performance_mode=performance.mode.value,
                     )
                     stage_counts["SERIALIZED_QA"] += 1
                     # SERIALIZED_QA reopens the exact mounted artifact.  The

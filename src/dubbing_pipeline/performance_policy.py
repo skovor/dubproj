@@ -14,6 +14,7 @@ class ModePolicy:
     notes: str
 
 _POLICIES={
+    PerformanceMode.UNRESOLVED: ModePolicy(PerformanceMode.UNRESOLVED, True, True, False, False, 100.0, "performance unresolved; retain lexical gates and block promotion"),
     PerformanceMode.NEUTRAL: ModePolicy(PerformanceMode.NEUTRAL,True,True,True,True,80.0,"full semantic and delivery QA"),
     PerformanceMode.FAST: ModePolicy(PerformanceMode.FAST,True,True,True,False,100.0,"rate is diagnostic; preserve words"),
     PerformanceMode.WHISPER: ModePolicy(PerformanceMode.WHISPER,True,True,False,False,120.0,"energy gate relaxed"),

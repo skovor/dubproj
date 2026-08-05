@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 class PerformanceMode(str, enum.Enum):
-    NEUTRAL="NEUTRAL"; FAST="FAST"; WHISPER="WHISPER"; SHOUT="SHOUT"; SCREAM_SPEECH="SCREAM_SPEECH"; CRYING_SPEECH="CRYING_SPEECH"; EFFORT="EFFORT"; LAUGH_SPEECH="LAUGH_SPEECH"
+    UNRESOLVED="UNRESOLVED"; NEUTRAL="NEUTRAL"; FAST="FAST"; WHISPER="WHISPER"; SHOUT="SHOUT"; SCREAM_SPEECH="SCREAM_SPEECH"; CRYING_SPEECH="CRYING_SPEECH"; EFFORT="EFFORT"; LAUGH_SPEECH="LAUGH_SPEECH"
 
 @dataclass(frozen=True)
 class PerformanceContract:
@@ -36,7 +36,7 @@ def classify_performance(*, metadata: Mapping[str, Any] | None = None, rms_dbfs:
     if rms_dbfs is not None and rms_dbfs < -48: return PerformanceEvidence(PerformanceMode.WHISPER, .62, rms_dbfs, pitch_hz, speech_ratio, duration_seconds, reason="low_energy")
     if rms_dbfs is not None and rms_dbfs > -8 and pitch_hz is not None and pitch_hz > 250: return PerformanceEvidence(PerformanceMode.SHOUT, .62, rms_dbfs, pitch_hz, speech_ratio, duration_seconds, reason="high_energy_pitch")
     if duration_seconds is not None and duration_seconds < 1.0: return PerformanceEvidence(PerformanceMode.FAST, .55, rms_dbfs, pitch_hz, speech_ratio, duration_seconds, reason="short_delivery")
-    return PerformanceEvidence(PerformanceMode.NEUTRAL, .50, rms_dbfs, pitch_hz, speech_ratio, duration_seconds, reason="no_strong_signature")
+    return PerformanceEvidence(PerformanceMode.UNRESOLVED, 0.0, rms_dbfs, pitch_hz, speech_ratio, duration_seconds, source="unresolved", reason="no_explicit_or_acoustic_signature")
 
 def extract_basic_features(samples: Sequence[float], sample_rate: int) -> dict[str, float]:
     if sample_rate <= 0: raise ValueError("sample_rate must be positive")

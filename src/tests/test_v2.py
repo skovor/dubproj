@@ -74,7 +74,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
             "feature_schema_version": "char-alignment-v2",
             "target_language": "de",
             "source_language": "en",
-            "performance_modes": ["NEUTRAL"],
+        "performance_modes": ["NEUTRAL", "UNRESOLVED"],
         },
         "thresholds": {
             "target_pass_probability": .65,
@@ -835,7 +835,7 @@ class V2SchedulerTests(unittest.TestCase):
             line = __import__("dubbing_pipeline.models", fromlist=["Line"]).Line("L1", "A", "Hello", "Hallo", 0, 1, topology="EMBEDDED_FMV", subtitle_authorized=True, reference_audio=str(ref), movie_identity_verified=True, card_identity_verified=True, card_timebase_verified=True, preserved_source_intervals=[{"start": 0.0, "end": 0.05}], source_resume=.7, speech_start=.1, speech_end=.7)
             report = run_scene_v2(Scene("S", "EMBEDDED_FMV", [line], source_stem=str(stem), movie_identity_verified=True), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=self.FakeCTC())
             self.assertTrue(report["pass"]); self.assertTrue(Path(report["mounted_output"]).is_file())
-            self.assertEqual(report["performance_by_line"]["L1"]["mode"], "NEUTRAL")
+            self.assertEqual(report["performance_by_line"]["L1"]["mode"], "UNRESOLVED")
             self.assertTrue(report["qa_routes"]["L1"])
             self.assertTrue(report["model_pool"]["loaded"])
             self.assertTrue((root / "out" / "S" / "state").exists())

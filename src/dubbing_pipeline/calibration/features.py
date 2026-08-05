@@ -100,7 +100,7 @@ def final_anchor_features(evidence: Mapping[str, Any]) -> dict[str, float]:
 
 
 def _performance_code(value: str) -> float:
-    return {"NEUTRAL": 0.0, "FAST": 1.0, "WHISPER": 2.0, "SHOUT": 3.0, "SCREAM_SPEECH": 4.0, "CRYING_SPEECH": 5.0, "EFFORT": 6.0, "LAUGH_SPEECH": 7.0}.get(str(value).upper(), 0.0)
+    return {"UNRESOLVED": 8.0, "NEUTRAL": 0.0, "FAST": 1.0, "WHISPER": 2.0, "SHOUT": 3.0, "SCREAM_SPEECH": 4.0, "CRYING_SPEECH": 5.0, "EFFORT": 6.0, "LAUGH_SPEECH": 7.0}.get(str(value).upper(), 8.0)
 
 
 def _finite(values: Mapping[str, float]) -> None:
