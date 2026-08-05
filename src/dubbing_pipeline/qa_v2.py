@@ -1001,7 +1001,6 @@ def apply_independent_evidence(
             )
         feature_vector_hash = _feature_vector_hash(feature_vector)
         final_anchor_feature_vector_hash = _feature_vector_hash(final_anchor_feature_vector, "final-anchor-v1")
-        lid_feature_vector_hash = _feature_vector_hash(lid_feature_vector, _LID_FEATURE_SCHEMA_VERSION) if lid_feature_vector is not None else None
         calibrated_target_probability = _execute_platt_calibrator(calibrator, feature_vector)
         calibrated_final_anchor_probability = _execute_platt_calibrator(final_anchor_calibrator, final_anchor_feature_vector)
         lid_feature_vector = _lid_feature_vector(
@@ -1014,6 +1013,10 @@ def apply_independent_evidence(
             ctc_target_calibrated_probability=calibrated_target_probability,
             performance_mode=performance_mode,
         )
+        # Hash the exact serving vector, after the calibrated target
+        # probability has been inserted.  Hashing the pre-calibration
+        # placeholder would make the persisted LID evidence unverifiable.
+        lid_feature_vector_hash = _feature_vector_hash(lid_feature_vector, _LID_FEATURE_SCHEMA_VERSION) if lid_feature_vector is not None else None
         calibrated_lid_probability = _execute_platt_calibrator(lid_calibrator, lid_feature_vector) if lid_feature_vector is not None else None
         if calibrated_target_probability is None or calibrated_final_anchor_probability is None or (lid_feature_vector is not None and calibrated_lid_probability is None):
             return LinguisticDecision(
