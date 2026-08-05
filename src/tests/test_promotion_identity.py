@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
+import json, os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dubbing_pipeline.calibration.identity import ModelIdentityError, resolve_alignment_identity
 from dubbing_pipeline.config import CalibrationConfigurationError, PipelineConfig, QAConfig
@@ -40,6 +41,19 @@ class PromotionIdentityTests(unittest.TestCase):
             lock.write_text(json.dumps({"models": [{**identity, "revision": "r2"}]}), encoding="utf-8")
             with self.assertRaises(ModelIdentityError):
                 resolve_alignment_identity(config, lock)
+
+    def test_declared_environment_never_becomes_observed_checkout(self):
+        from dubbing_pipeline.config import resolve_runtime_code_identity
+        with patch.dict(os.environ, {"DUBPROJ_CODE_COMMIT": "a" * 40}, clear=False):
+            identity = resolve_runtime_code_identity(PipelineConfig(extra={"code_commit": "a" * 40}), require=False)
+        self.assertNotEqual(identity["observed_checkout_commit"], "")
+        self.assertNotEqual(identity["identity_source"], "environment")
+        self.assertFalse(identity["valid"])
+
+    def test_lab_without_authority_can_report_unmatched_identity(self):
+        from dubbing_pipeline.config import resolve_runtime_code_identity
+        identity = resolve_runtime_code_identity(PipelineConfig(lab_mode=True, qa=QAConfig(calibration_authority=False)), require=False)
+        self.assertIn("observed_checkout_commit", identity)
 
 
 if __name__ == "__main__":

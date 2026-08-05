@@ -22,19 +22,33 @@ def validate_production_calibration_identity(config: Any) -> None:
     """Require the exact source commit before any production TTS work."""
     if bool(getattr(config, "lab_mode", True)):
         return
-    expected = str(getattr(getattr(config, "qa", None), "expected_calibration_code_commit", "") or "").strip()
-    if not expected:
+    identity = resolve_runtime_code_identity(config, require=True)
+    if not identity["expected_calibration_code_commit"]:
         raise CalibrationConfigurationError("BLOCKED_EXPECTED_CODE_COMMIT_REQUIRED", "production calibration requires qa.expected_calibration_code_commit before generation")
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", expected):
-        raise CalibrationConfigurationError("BLOCKED_CODE_COMMIT_MISMATCH", "qa.expected_calibration_code_commit must be a full 40-character Git SHA")
-    actual = str(getattr(config, "extra", {}).get("code_commit") or os.environ.get("DUBPROJ_CODE_COMMIT", "")).strip()
-    if not actual:
-        try:
-            actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
-        except Exception:
-            actual = ""
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", actual) or actual.lower() != expected.lower():
-        raise CalibrationConfigurationError("BLOCKED_CODE_COMMIT_MISMATCH", "qa.expected_calibration_code_commit does not match the running checkout")
+
+
+def resolve_runtime_code_identity(config: Any | None = None, *, require: bool = False) -> dict[str, Any]:
+    """Separate declared build metadata from an independently observed Git SHA."""
+    declared_config = str(getattr(config, "extra", {}).get("code_commit", "") if config is not None else "").strip()
+    declared_env = str(os.environ.get("DUBPROJ_CODE_COMMIT", "")).strip()
+    if declared_config and declared_env and declared_config.lower() != declared_env.lower():
+        result = {"expected_calibration_code_commit": str(getattr(getattr(config, "qa", None), "expected_calibration_code_commit", "") or "").strip(), "declared_build_commit": declared_config, "observed_checkout_commit": "", "identity_source": "conflicting_declarations", "valid": False, "status": "BLOCKED_DECLARATION_CONFLICT"}
+        if require: raise CalibrationConfigurationError(result["status"], "config and environment declare different build commits")
+        return result
+    declared = declared_config or declared_env
+    repo_root = Path(__file__).resolve().parents[2]
+    observed = ""
+    try:
+        observed = subprocess.check_output(["git", "-C", str(repo_root), "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        observed = ""
+    expected = str(getattr(getattr(config, "qa", None), "expected_calibration_code_commit", "") or "").strip() if config is not None else ""
+    valid = bool(re.fullmatch(r"[0-9a-fA-F]{40}", observed)) and (not declared or declared.lower() == observed.lower()) and (not expected or expected.lower() == observed.lower())
+    status = "MATCHED" if valid else ("BLOCKED_EXPECTED_CODE_COMMIT_REQUIRED" if require and not expected else "BLOCKED_CODE_COMMIT_MISMATCH")
+    result = {"expected_calibration_code_commit": expected, "declared_build_commit": declared, "observed_checkout_commit": observed, "identity_source": "git", "valid": valid, "status": status}
+    if require and not valid:
+        raise CalibrationConfigurationError(status, "declared, expected and observed runtime code identities do not match")
+    return result
 
 
 def _path(value: str | Path | None, base: Path) -> Path | None:
@@ -193,4 +207,4 @@ class PipelineConfig:
         return reproducibility_report(self, strict=strict)
 
 
-__all__ = ["CalibrationConfigurationError", "PipelineConfig", "QAConfig", "validate_production_calibration_identity"]
+__all__ = ["CalibrationConfigurationError", "PipelineConfig", "QAConfig", "resolve_runtime_code_identity", "validate_production_calibration_identity"]
