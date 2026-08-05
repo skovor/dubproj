@@ -634,6 +634,17 @@ class V2QATests(unittest.TestCase):
         self.assertEqual("".join(row["char"] for row in rows), "Sorge")
         self.assertEqual(rows[0]["start"], 0.0)
 
+    def test_speechbrain_log_score_is_exponentiated(self):
+        from dubbing_pipeline.alignment import SpeechBrainVoxLingua107
+        class FakeClassifier:
+            def classify_file(self, _path):
+                return ([[0.0]], [-0.2231435513142097], [0], ["en"])
+        adapter = SpeechBrainVoxLingua107()
+        adapter._classifier = FakeClassifier()
+        value = adapter.detect("audio.wav")
+        self.assertAlmostEqual(value["probability"], .8, places=6)
+        self.assertLess(value["log_probability"], 0.0)
+
     def test_line_summary_does_not_use_first_candidate_as_authority(self):
         class Candidate:
             def __init__(self, value): self.candidate_id = value

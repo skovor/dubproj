@@ -7,6 +7,7 @@ only a selected provisional winner or an uncertain candidate is escalated.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -764,10 +765,21 @@ class SpeechBrainVoxLingua107:
                 score_value = score_value[0]
             if hasattr(score_value, "item"):
                 score_value = score_value.item()
-            confidence = float(score_value)
+            log_score = float(score_value)
+            if not math.isfinite(log_score):
+                raise ValueError("SpeechBrain score is non-finite")
+            # VoxLingua's ``score`` is the winning log posterior, not a
+            # linear probability.  Clipping it directly to [0, 1] turns every
+            # normal negative log posterior into 0.0 and makes an otherwise
+            # confident source-language result look uncertain.  Preserve both
+            # values so the evidence is auditable and exponentiate exactly
+            # once at this adapter boundary.
+            confidence = math.exp(log_score) if log_score <= 0.0 else log_score
+            confidence = max(0.0, min(1.0, confidence))
         except (TypeError, ValueError, IndexError):
+            log_score = None
             confidence = 0.0
-        return {"language": label, "probability": max(0.0, min(1.0, confidence))}
+        return {"language": label, "probability": confidence, "log_probability": log_score}
 
 
 def language_id_evidence(backend: LanguageIdentifier, path: str | Path) -> dict[str, Any]:
