@@ -3,7 +3,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from dubbing_pipeline.benchmark import BenchmarkManifest, build_invocation_receipt, run_benchmark, trusted_runner_identity, validate_manifest, verify_benchmark_row, _ast_calls_run_scene
-from dubbing_pipeline.hashing import contract_hash, sha256_file
+from dubbing_pipeline.hashing import canonical_json, contract_hash, sha256_bytes, sha256_file
 from adapters.second_game_template import SecondGameAdapter
 from dubbing_pipeline.attestation import sign_attestation, verify_attestation, subject_digest
 
@@ -16,7 +16,18 @@ class FinalValidationTests(unittest.TestCase):
             root=Path(tmp); audio=root/"audio.wav"; reference=root/"reference.wav"; audio.write_bytes(b"audio"); reference.write_bytes(b"reference")
             import hashlib
             result=SecondGameAdapter("other").validate({"scenes":[{"scene_id":"s","game_id":"other","audio_path":str(audio),"reference_path":str(reference),"audio_sha256":hashlib.sha256(audio.read_bytes()).hexdigest(),"reference_sha256":hashlib.sha256(reference.read_bytes()).hexdigest(),"timing":{"start":0,"end":1},"extraction_status":"VERIFIED"}]})
-            self.assertTrue(result["valid"]); self.assertTrue(result["independent_adapter"]); self.assertTrue(result["content_verified"])
+            self.assertFalse(result["valid"])
+
+    def test_second_game_requires_decoded_audio_and_extraction_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); audio=root/"audio.wav"; reference=root/"reference.wav"
+            import soundfile as sf, numpy as np, hashlib
+            sf.write(audio, np.zeros(2400, dtype="float32"), 24000); sf.write(reference, np.zeros(2400, dtype="float32"), 24000)
+            code = "a" * 40; payload={"schema":"second-game-extraction-receipt-v1","scene_id":"s","game_id":"other","audio_sha256":sha256_file(audio),"reference_sha256":sha256_file(reference),"source_container_sha256":"c"*64,"extractor_id":"dq3-tool","extractor_version":"1.0","code_commit":code,"timing":{"start":0,"end":1}}
+            receipt={**payload,"receipt_sha256":sha256_bytes(canonical_json(payload))}
+            manifest={"scenes":[{"scene_id":"s","game_id":"other","audio_path":str(audio),"reference_path":str(reference),"audio_sha256":sha256_file(audio),"reference_sha256":sha256_file(reference),"timing":{"start":0,"end":1},"extraction_status":"VERIFIED","extraction_receipt":receipt}]}
+            result=SecondGameAdapter("other").validate(manifest, expected_commit=code)
+            self.assertTrue(result["valid"]); self.assertTrue(result["independent_adapter"])
     def test_manifest_is_content_addressed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

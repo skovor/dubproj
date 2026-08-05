@@ -31,3 +31,4 @@ pluggy==1.5.0
 pygments==2.19.1
 colorama==0.4.6
 typing_extensions==4.12.2
+cryptography==44.0.2
