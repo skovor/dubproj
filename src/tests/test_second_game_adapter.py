@@ -2,9 +2,10 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
-from dubbing_pipeline.benchmark import BenchmarkManifest, run_benchmark, trusted_runner_identity, validate_manifest, verify_benchmark_row, _ast_calls_run_scene
+from dubbing_pipeline.benchmark import BenchmarkManifest, build_invocation_receipt, run_benchmark, trusted_runner_identity, validate_manifest, verify_benchmark_row, _ast_calls_run_scene
 from dubbing_pipeline.hashing import contract_hash, sha256_file
 from adapters.second_game_template import SecondGameAdapter
+from dubbing_pipeline.attestation import sign_attestation, verify_attestation, subject_digest
 
 class FinalValidationTests(unittest.TestCase):
     def test_manifest_identity_and_rate(self):
@@ -56,7 +57,8 @@ class FinalValidationTests(unittest.TestCase):
             import soundfile as sf
             import numpy as np
             sf.write(output, np.ones(2400, dtype="float32") * .01, 24000)
-            report={"lines":[{"id":"l1","status":"FINAL_PASS","output":str(output)}]}
+            report={"scene_id":"s","run_id":"r","lines":[{"id":"l1","status":"FINAL_PASS","output":str(output)}]}
+            report["invocation_receipt"] = build_invocation_receipt(report, code_commit="a" * 40)
             report_path.write_text(__import__("json").dumps(report), encoding="utf-8")
             row={"status":"FINAL_PASS","report_path":str(report_path),"output_path":str(output),"report_sha256":sha256_file(report_path),"output_sha256":sha256_file(output),"report_contract_hash":contract_hash("benchmark-report-v1", {"line_id":"l1","report":report}, files=[output])}
             self.assertTrue(verify_benchmark_row("l1", row)["valid"])
@@ -67,5 +69,14 @@ class FinalValidationTests(unittest.TestCase):
         from scripts.promote_branch import execute_second_game_adapter
         result=execute_second_game_adapter({"valid":True,"independent_adapter":True,"content_verified":True}, Path(__file__).resolve().parents[1])
         self.assertFalse(result["valid"])
+
+    def test_benchmark_boolean_claim_is_not_an_attestation(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        import base64
+        private = Ed25519PrivateKey.generate(); public = base64.b64encode(private.public_key().public_bytes_raw()).decode("ascii"); private_b64 = base64.b64encode(private.private_bytes_raw()).decode("ascii")
+        subject = {"schema": "benchmark-attestation-subject-v1", "manifest_digest": "m", "code_commit": "a" * 40, "benchmark_payload_sha256": "b" * 64}
+        signed = sign_attestation(subject, private_b64, key_id="ci")
+        self.assertTrue(verify_attestation(signed, public, expected_subject=subject, expected_commit="a" * 40))
+        self.assertFalse(verify_attestation({"verified": True}, public, expected_subject=subject, expected_commit="a" * 40))
 
 if __name__=="__main__": unittest.main()

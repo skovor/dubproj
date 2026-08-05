@@ -15,6 +15,7 @@ from dubbing_pipeline.benchmark import (
     validate_manifest,
     verify_benchmark_row,
 )
+from dubbing_pipeline.benchmark import build_invocation_receipt
 from dubbing_pipeline.calibration import (
     FINAL_ANCHOR_FEATURES,
     LID_FEATURES,
@@ -231,12 +232,12 @@ class CrossModuleIntegrationTests(unittest.TestCase):
             sf.write(output, audio, 24000); sf.write(reference, audio, 24000); model_lock.write_bytes(b"models"); runtime_lock.write_bytes(b"runtime")
             manifest = BenchmarkManifest.from_paths(benchmark_id="integration", line_ids=("L1",), audio_paths=(str(output),), reference_paths=(str(reference),), model_lock=str(model_lock), runtime_lock=str(runtime_lock), calibration_profile=None, config_hash="config", commit="commit", topology="LINE_SEPARATED")
             self.assertTrue(validate_manifest(manifest)["real_audio"])
-            report_path = root / "report.json"; report = {"lines": [{"id": "L1", "status": "FINAL_PASS", "output": str(output)}]}; report_path.write_text(json.dumps(report), encoding="utf-8")
+            report_path = root / "report.json"; report = {"scene_id": "s", "run_id": "run", "lines": [{"id": "L1", "status": "FINAL_PASS", "output": str(output)}]}; report["invocation_receipt"] = build_invocation_receipt(report, code_commit="a" * 40); report_path.write_text(json.dumps(report), encoding="utf-8")
             row = {"status": "FINAL_PASS", "report_path": str(report_path), "output_path": str(output), "report_sha256": sha256_file(report_path), "output_sha256": sha256_file(output), "report_contract_hash": contract_hash("benchmark-report-v1", {"line_id": "L1", "report": report}, files=[output])}
             self.assertTrue(verify_benchmark_row("L1", row)["valid"])
             second_manifest = root / "second.json"; second_manifest.write_text(json.dumps({"scenes": [{"scene_id": "s", "game_id": "dq3", "audio_path": str(output), "reference_path": str(reference), "audio_sha256": sha256_file(output), "reference_sha256": sha256_file(reference), "timing": {"start": 0, "end": 1}, "extraction_status": "VERIFIED"}]}), encoding="utf-8")
             result = execute_second_game_adapter({"game_id": "dq3", "adapter_entrypoint": "adapters.second_game_template:SecondGameAdapter", "manifest_path": str(second_manifest)}, Path(__file__).resolve().parents[1])
-            self.assertTrue(result["executed"]); self.assertTrue(result["valid"]); self.assertTrue(result["content_verified"])
+            self.assertFalse(result.get("valid"), "legacy second-game descriptor must not bypass provenance checks")
             with self.assertRaises(ValueError):
                 run_benchmark(manifest, lambda *_: {"status": "FINAL_PASS"}, require_files=True, require_trusted_runner=True, repository_root=Path(__file__).resolve().parents[1])
 

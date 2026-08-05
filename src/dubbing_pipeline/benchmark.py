@@ -5,7 +5,42 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from .audio import read
-from .hashing import contract_hash, sha256_file
+from .hashing import canonical_json, contract_hash, sha256_bytes, sha256_file
+
+
+def _report_without_invocation_receipt(report: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(report); value.pop("invocation_receipt", None); return value
+
+
+def build_invocation_receipt(report: Mapping[str, Any], *, code_commit: str) -> dict[str, Any]:
+    """Create a receipt over the report before the receipt is inserted."""
+    import re
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(code_commit or "")):
+        raise ValueError("scene invocation requires a full code commit SHA")
+    base = _report_without_invocation_receipt(report)
+    outputs: dict[str, str] = {}
+    for row in base.get("lines", []) if isinstance(base.get("lines"), list) else []:
+        if isinstance(row, Mapping) and row.get("output") and Path(str(row["output"])).is_file():
+            outputs[str(row.get("id") or row.get("line_id"))] = sha256_file(Path(str(row["output"])))
+    if base.get("mounted_output") and Path(str(base["mounted_output"])).is_file():
+        outputs["__scene__"] = sha256_file(Path(str(base["mounted_output"])))
+    payload = {"schema": "scene-invocation-receipt-v1", "scene_id": str(base.get("scene_id") or ""), "run_id": str(base.get("run_id") or contract_hash("scene-run", {"scene": base.get("scene_id"), "contract": base.get("contract_hash")})), "code_commit": str(code_commit).lower(), "report_sha256": sha256_bytes(canonical_json(base)), "outputs_sha256": outputs}
+    payload["receipt_sha256"] = sha256_bytes(canonical_json(payload))
+    return payload
+
+
+def verify_invocation_receipt(report: Mapping[str, Any], *, line_id: str, output_sha256: str, expected_commit: str | None = None) -> dict[str, Any]:
+    receipt = report.get("invocation_receipt") if isinstance(report, Mapping) else None
+    errors: list[str] = []
+    if not isinstance(receipt, Mapping) or receipt.get("schema") != "scene-invocation-receipt-v1":
+        return {"valid": False, "errors": ["invocation_receipt_missing"]}
+    payload = {key: receipt[key] for key in receipt if key != "receipt_sha256"}
+    if str(receipt.get("receipt_sha256", "")) != sha256_bytes(canonical_json(payload)): errors.append("invocation_receipt_hash_mismatch")
+    if str(receipt.get("report_sha256", "")) != sha256_bytes(canonical_json(_report_without_invocation_receipt(report))): errors.append("invocation_report_hash_mismatch")
+    if expected_commit is not None and str(receipt.get("code_commit", "")).lower() != str(expected_commit).lower(): errors.append("invocation_commit_mismatch")
+    outputs = receipt.get("outputs_sha256") if isinstance(receipt.get("outputs_sha256"), Mapping) else {}
+    if str(outputs.get(str(line_id), "")) != str(output_sha256): errors.append("invocation_output_hash_mismatch")
+    return {"valid": not errors, "errors": errors, "code_commit": receipt.get("code_commit"), "run_id": receipt.get("run_id")}
 
 @dataclass(frozen=True)
 class BenchmarkManifest:
@@ -136,7 +171,7 @@ def trusted_runner_identity(runner: Callable[[str, str, str], Mapping[str, Any]]
     return {"module": module, "qualname": qualname, "source_file": str(source_path), "source_sha256": sha256_file(source_path), "trusted": True, "allowlist_root": str(root)}
 
 
-def _verify_runner_row(line_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
+def _verify_runner_row(line_id: str, result: Mapping[str, Any], *, expected_commit: str | None = None) -> dict[str, Any]:
     """Reopen and verify the report/output artifacts emitted by a trusted runner."""
     required=("report_path", "output_path", "report_sha256", "output_sha256", "report_contract_hash")
     missing=[name for name in required if not str(result.get(name) or "").strip()]
@@ -169,12 +204,14 @@ def _verify_runner_row(line_id: str, result: Mapping[str, Any]) -> dict[str, Any
         if declared_output and Path(str(declared_output)).resolve() != output_path.resolve(): errors.append("report_output_mismatch")
     computed_contract=contract_hash("benchmark-report-v1", {"line_id": str(line_id), "report": report}, files=[output_path])
     if computed_contract != str(result["report_contract_hash"]): errors.append("report_contract_hash_mismatch")
-    return {"valid": not errors, "errors": errors, "report_sha256": observed_report_sha, "output_sha256": observed_output_sha, "report_contract_hash": computed_contract}
+    invocation = verify_invocation_receipt(report, line_id=str(line_id), output_sha256=observed_output_sha, expected_commit=expected_commit)
+    if not invocation["valid"]: errors.extend(invocation["errors"])
+    return {"valid": not errors, "errors": errors, "report_sha256": observed_report_sha, "output_sha256": observed_output_sha, "report_contract_hash": computed_contract, "invocation": invocation}
 
 
-def verify_benchmark_row(line_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
+def verify_benchmark_row(line_id: str, result: Mapping[str, Any], *, expected_commit: str | None = None) -> dict[str, Any]:
     """Public promotion-time recheck of one emitted report/output pair."""
-    return _verify_runner_row(line_id, result)
+    return _verify_runner_row(line_id, result, expected_commit=expected_commit)
 
 
 def run_benchmark(manifest: BenchmarkManifest, runner: Callable[[str, str, str], Mapping[str, Any]], *, require_files: bool = True, require_trusted_runner: bool = False, repository_root: str | Path | None = None) -> BenchmarkResult:
@@ -187,9 +224,9 @@ def run_benchmark(manifest: BenchmarkManifest, runner: Callable[[str, str, str],
     for line_id,audio,reference in zip(manifest.line_ids,manifest.audio_paths,manifest.reference_paths):
         item_start=time.perf_counter(); result=dict(runner(line_id,audio,reference)); stage_time["line_total"] = stage_time.get("line_total",0.0)+(time.perf_counter()-item_start)
         if require_trusted_runner:
-            row_evidence=_verify_runner_row(line_id, result); result={**result, "artifact_verification": row_evidence}
+            row_evidence=_verify_runner_row(line_id, result, expected_commit=manifest.commit if len(str(manifest.commit)) == 40 else None); result={**result, "artifact_verification": row_evidence}
             if not row_evidence["valid"]: result={**result, "status": "BLOCKED"}
         status=str(result.get("status","BLOCKED")); passed+=status in {"PASS","FINAL_PASS"}; failed+=status in {"FAIL","FAILED"}; blocked+=status not in {"PASS","FINAL_PASS","FAIL","FAILED"}; quality.append(result)
     elapsed=max(1e-9,time.perf_counter()-started); return BenchmarkResult(manifest.digest(),len(manifest.line_ids),elapsed,len(manifest.line_ids)/(elapsed/60),passed,failed,blocked,bool(validation.get("real_audio")),stage_time,{"rows":quality,"manifest_validation":validation,"evidence_integrity":{"mode":"self_hash_only","promotion_allowed":False}},False,identity)
 
-__all__=["BenchmarkManifest","BenchmarkResult","validate_manifest","trusted_runner_identity","verify_benchmark_row","run_benchmark"]
+__all__=["BenchmarkManifest","BenchmarkResult","validate_manifest","trusted_runner_identity","verify_benchmark_row","run_benchmark","build_invocation_receipt","verify_invocation_receipt"]

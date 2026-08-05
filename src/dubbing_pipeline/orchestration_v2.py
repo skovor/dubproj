@@ -6,7 +6,7 @@ scene have all passed their own evidence-backed audits.
 """
 from __future__ import annotations
 
-import re
+import os, re, subprocess
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,7 @@ from .attempts import AttemptStore
 from .repair import FailureCause, apply_repair, repaired_candidate
 from .repair_planner import plan_repairs
 from .config import validate_production_calibration_identity
+from .benchmark import build_invocation_receipt
 
 
 def _line_window(line: Line, sample_rate: int, scene_id: str, channel: int) -> DeliveryWindow:
@@ -1070,6 +1071,16 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     }
     run_state.commit(RunState(scene.id, "FINAL", {line_id: str(row.get("status", "UNKNOWN")) for line_id, row in row_by_id.items()}, list(report["blockers"]), cursor=scene.id), {"event": "scene_finished", "scene_id": scene.id, "passed": report["pass"]})
     report["contract_hash"] = contract_hash("scene-v2", {"scene": scene.to_dict(), "config": config.to_dict(), "scene_qa": report["scene_qa"]})
+    configured_commit = str(getattr(config, "extra", {}).get("code_commit") or os.environ.get("DUBPROJ_CODE_COMMIT", "")).strip()
+    if not configured_commit:
+        try:
+            configured_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            configured_commit = ""
+    if re.fullmatch(r"[0-9a-fA-F]{40}", configured_commit):
+        report["invocation_receipt"] = build_invocation_receipt(report, code_commit=configured_commit)
+    else:
+        report["invocation_receipt"] = {"schema": "scene-invocation-receipt-v1", "status": "BLOCKED_CODE_COMMIT_UNAVAILABLE"}
     atomic_json(out / "FINAL_REPORT_V2.json", report)
     repair_store.close()
     if owned_pool:
