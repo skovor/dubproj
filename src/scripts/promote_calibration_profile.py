@@ -19,6 +19,7 @@ from dubbing_pipeline.calibration import FeatureRow, LIDFeatureRow, load_draft
 from dubbing_pipeline.calibration.promote import promote_profile
 from dubbing_pipeline.calibration.validate import ValidationReport, evaluate
 from dubbing_pipeline.goldset import GoldsetStore
+from dubbing_pipeline.calibration.identity import resolve_alignment_identity
 
 
 def _sha(path: Path) -> str:
@@ -66,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--splits", required=True)
     parser.add_argument("--models-lock", required=True)
     parser.add_argument("--runtime-lock", required=True)
+    parser.add_argument("--config", required=True, help="manifest/config declaring exactly one alignment model role")
     parser.add_argument("--output", required=True)
     parser.add_argument("--goldset-db", required=True, help="authoritative SQLite GoldsetStore")
     parser.add_argument("--hidden-receipt-id", required=True)
@@ -79,11 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     lid_validation_rows = [row for row in lid_rows if row.split == "validation"]; lid_hidden_rows = [row for row in lid_rows if row.split == "hidden_test"]
     validation = _report(Path(args.validation_report)); hidden = _report(Path(args.hidden_report)); anchor_validation = _report(Path(args.final_validation_report)); anchor_hidden = _report(Path(args.final_hidden_report)); lid_validation = _report(Path(args.lid_validation_report)); lid_hidden = _report(Path(args.lid_hidden_report))
     models_path, runtime_path = Path(args.models_lock), Path(args.runtime_lock)
-    models = json.loads(models_path.read_text(encoding="utf-8")); model = (models.get("models") or [None])[0]
-    if not isinstance(model, dict):
-        raise RuntimeError("models lock has no model identity")
-    backend_id = str(model.get("backend_id") or model.get("backend") or "")
-    identity = {"backend_id": backend_id, "model_id": str(model.get("model_id", "")), "model_revision": str(model.get("revision", "")), "feature_schema_version": str(target.get("feature_schema_version", "")), "target_language": str(model.get("language", "de")), "source_language": "en", "performance_modes": sorted({row.performance_mode for row in feature_rows})}
+    identity = resolve_alignment_identity(args.config, models_path)
     thresholds = {"target_pass_probability": .8, "target_failure_probability": .2, "final_anchor_pass_probability": .8, "source_lid_probability": .8}
     provenance = {"code_commit": _git_sha(), "runtime_lock_sha256": _sha(runtime_path), "models_lock_sha256": _sha(models_path)}
     profile_id = f"{identity['model_id']}-{uuid.uuid4().hex[:8]}"

@@ -3,9 +3,29 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+class CalibrationConfigurationError(RuntimeError):
+    """Fail-closed production configuration error with a machine status."""
+
+    def __init__(self, status: str, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def validate_production_calibration_identity(config: Any) -> None:
+    """Require the exact source commit before any production TTS work."""
+    if bool(getattr(config, "lab_mode", True)):
+        return
+    expected = str(getattr(getattr(config, "qa", None), "expected_calibration_code_commit", "") or "").strip()
+    if not expected:
+        raise CalibrationConfigurationError("BLOCKED_EXPECTED_CODE_COMMIT_REQUIRED", "production calibration requires qa.expected_calibration_code_commit before generation")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", expected):
+        raise CalibrationConfigurationError("BLOCKED_CODE_COMMIT_MISMATCH", "qa.expected_calibration_code_commit must be a full 40-character Git SHA")
 
 
 def _path(value: str | Path | None, base: Path) -> Path | None:
@@ -162,3 +182,6 @@ class PipelineConfig:
         from .runtime_lock import reproducibility_report
 
         return reproducibility_report(self, strict=strict)
+
+
+__all__ = ["CalibrationConfigurationError", "PipelineConfig", "QAConfig", "validate_production_calibration_identity"]

@@ -39,6 +39,7 @@ from .state import StateStore
 from .attempts import AttemptStore
 from .repair import FailureCause, apply_repair, repaired_candidate
 from .repair_planner import plan_repairs
+from .config import validate_production_calibration_identity
 
 
 def _line_window(line: Line, sample_rate: int, scene_id: str, channel: int) -> DeliveryWindow:
@@ -337,6 +338,9 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     audited.  FMV winners are selected only from combinations that pass the
     complete scene audit.
     """
+    # This is intentionally the first production check.  It executes before
+    # model-pool creation, reference materialization and every TTS call.
+    validate_production_calibration_identity(config)
     if not bool(getattr(config, "lab_mode", True)):
         # Direct API callers receive the same fail-closed guarantee as the
         # CLI. Lab mode explicitly reports LAB_UNPINNED instead.
