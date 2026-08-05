@@ -776,7 +776,11 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                         whisper_language=(automatic_snapshot or {}).get("language") if isinstance(automatic_snapshot, dict) else None,
                         whisper_probability=(automatic_snapshot or {}).get("probability") if isinstance(automatic_snapshot, dict) else None,
                         lid=lid_obj,
-                        ctc_target_probability=alignment.target_score,
+                        ctc_target_raw_score=alignment.target_score,
+                        # Alignment adapters currently expose the calibrated
+                        # target score under the historical field; keep this
+                        # explicit until a separate CTC calibrator is wired.
+                        ctc_target_calibrated_probability=alignment.target_score,
                         policy=LIDPolicy(source_language=config.source_language, target_language=config.target_language),
                     )
                     lid["fusion"] = lid_fusion

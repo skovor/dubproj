@@ -43,7 +43,7 @@ _FINAL_ANCHOR_FEATURES = (
     "insertions_inside_anchor", "final_interpolated",
 )
 _LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v1"
-_LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "ctc_target_probability", "duration_seconds", "speech_ratio", "performance_mode")
+_LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode")
 _PERFORMANCE_MODE_CODES = {
     "NEUTRAL": 0.0,
     "FAST": 1.0,
@@ -799,7 +799,7 @@ def _final_anchor_is_calibrated(
     return decision.final_anchor_present is True
 
 
-def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, whisper_probability: float | None, ctc_target_probability: float | None, performance_mode: str | None) -> dict[str, float] | None:
+def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, whisper_probability: float | None = None, whisper_source_probability: float | None = None, whisper_target_probability: float | None = None, ctc_target_probability: float | None = None, ctc_target_raw_score: float | None = None, ctc_target_calibrated_probability: float | None = None, performance_mode: str | None) -> dict[str, float] | None:
     if not isinstance(lid_evidence, Mapping):
         return None
     probabilities = lid_evidence.get("probabilities") if isinstance(lid_evidence.get("probabilities"), Mapping) else {}
@@ -807,8 +807,10 @@ def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, whisper_proba
         values = {
             "lid_source_probability": float(lid_evidence.get("source_probability", probabilities.get("en", 0.0))),
             "lid_target_probability": float(lid_evidence.get("target_probability", probabilities.get("de", 0.0))),
-            "whisper_source_probability": float(whisper_probability or 0.0),
-            "ctc_target_probability": float(ctc_target_probability if ctc_target_probability is not None else 0.0),
+            "whisper_source_probability": float(whisper_source_probability if whisper_source_probability is not None else (whisper_probability or 0.0)),
+            "whisper_target_probability": float(whisper_target_probability if whisper_target_probability is not None else 0.0),
+            "ctc_target_raw_score": float(ctc_target_raw_score if ctc_target_raw_score is not None else (ctc_target_probability if ctc_target_probability is not None else 0.0)),
+            "ctc_target_calibrated_probability": float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else 0.0),
             "duration_seconds": float(lid_evidence.get("duration_seconds", lid_evidence.get("duration", 0.0))),
             "speech_ratio": float(lid_evidence.get("speech_ratio", 0.0)),
             "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper(), 0.0),
@@ -950,7 +952,7 @@ def apply_independent_evidence(
         lid_calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("lid", {})).get("artifact_sha256", ""))
         feature_vector = _alignment_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
         final_anchor_feature_vector = _final_anchor_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
-        lid_feature_vector = _lid_feature_vector(lid_evidence, whisper_probability=base.language_probability, ctc_target_probability=raw_target_score, performance_mode=performance_mode)
+        lid_feature_vector = _lid_feature_vector(lid_evidence, whisper_target_probability=base.language_probability, ctc_target_raw_score=raw_target_score, performance_mode=performance_mode)
         if feature_vector is None or final_anchor_feature_vector is None:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,

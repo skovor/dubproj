@@ -23,8 +23,14 @@ def route_qa(*, technical_passed: bool, provisional_status: str | None = None, c
     """Return the cheapest evidence path that can resolve the current state."""
     if not technical_passed: return [QALevel.TECHNICAL]
     levels = [QALevel.WHISPER_DUAL]
-    if provisional_status in {"PASS_SCREENED", "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK", "ASR_UNCERTAIN"}: levels.append(QALevel.CTC_WINNER)
-    if candidate_count > 1 and lid_available: levels.append(QALevel.CTC_LID_SECOND)
+    ctc_statuses = {"PASS_SCREENED", "PASS_SCREENED_WITH_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_SUPPORT", "TARGET_ALIGNMENT_WEAK", "ASR_UNCERTAIN", "LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION", "EVIDENCE_CONFLICT"}
+    if provisional_status in ctc_statuses: levels.append(QALevel.CTC_WINNER)
+    # Language conflict is an escalation trigger even for a single candidate;
+    # requiring candidate_count>1 used to skip the independent LID/CTC path.
+    if provisional_status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION", "EVIDENCE_CONFLICT"} and lid_available:
+        levels.append(QALevel.CTC_LID_SECOND)
+    elif candidate_count > 1 and lid_available:
+        levels.append(QALevel.CTC_LID_SECOND)
     if mfa_requested: levels.append(QALevel.MFA_PERFORMANCE)
     return levels
 

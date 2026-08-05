@@ -54,10 +54,10 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
         "schema": "platt-calibrator-v1", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v2",
         "features": final_features, "coefficients": [1.2, .8, .7, .7, -.01, -1.0, -1.0, -1.0, -1.0], "intercept": -1.1, "normalization": final_normalization,
     }), encoding="utf-8")
-    lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "ctc_target_probability", "duration_seconds", "speech_ratio", "performance_mode"]
+    lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode"]
     lid_artifact.write_text(json.dumps({
         "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v2",
-        "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0], "intercept": 0.0,
+        "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0], "intercept": 0.0,
         "normalization": [{"mean": 0.0, "scale": 1.0} for _ in lid_features],
     }), encoding="utf-8")
     runtime_lock.write_bytes(b"runtime-lock-for-test")

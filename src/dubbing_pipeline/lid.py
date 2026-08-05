@@ -50,18 +50,22 @@ def independent_lid(backend: Any, audio_path: str | Path, *, policy: LIDPolicy, 
     return _evidence(status, language, probabilities, backend_id, model_id, revision, digest, duration_seconds, sample_rate, speech_ratio, "" if status == "LID_CONFIDENT" else "confidence_below_threshold")
 
 
-def fuse_language_evidence(*, whisper_language: str | None, whisper_probability: float | None, lid: LIDEvidence | None, ctc_target_probability: float | None, policy: LIDPolicy) -> dict[str, Any]:
+def fuse_language_evidence(*, whisper_language: str | None, whisper_probability: float | None, lid: LIDEvidence | None, ctc_target_probability: float | None = None, ctc_target_raw_score: float | None = None, ctc_target_calibrated_probability: float | None = None, policy: LIDPolicy) -> dict[str, Any]:
     """Fuse independent LID with Whisper/CTC without treating either as truth."""
     if lid is None or lid.status == "LID_NOT_APPLICABLE": return {"status": "LID_NOT_APPLICABLE", "reason": lid.reason if lid else "backend_unavailable", "evidence_families": ["WHISPER_ASR"]}
     whisper_source = str(whisper_language or "").casefold().split("-", 1)[0] == policy.source_language and float(whisper_probability or 0.0) >= .70
     lid_source = lid.language == policy.source_language and float(lid.probabilities.get(policy.source_language, 0.0)) >= policy.minimum_confidence
     lid_target = lid.language == policy.target_language and float(lid.probabilities.get(policy.target_language, 0.0)) >= policy.minimum_confidence
-    ctc = float(ctc_target_probability) if ctc_target_probability is not None and math.isfinite(float(ctc_target_probability)) else None
+    raw_ctc = float(ctc_target_raw_score) if ctc_target_raw_score is not None and math.isfinite(float(ctc_target_raw_score)) else None
+    # The legacy parameter is retained as a compatibility alias for a
+    # calibrated probability.  New callers must name raw and calibrated CTC
+    # values explicitly so a raw score can never masquerade as a probability.
+    ctc = float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else ctc_target_probability) if (ctc_target_calibrated_probability is not None or ctc_target_probability is not None) and math.isfinite(float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else ctc_target_probability)) else None
     if whisper_source and lid_source and ctc is not None and ctc < .45: status = "LANGUAGE_LEAK_CONFIRMED"
     elif lid_source and ctc is not None and ctc >= .80: status = "EVIDENCE_CONFLICT"
     elif lid.status == "LID_UNCERTAIN" or (not lid_source and not lid_target): status = "LID_UNCERTAIN"
     else: status = "NO_LANGUAGE_LEAK_EVIDENCE"
-    return {"status": status, "whisper_source": whisper_source, "lid_source": lid_source, "lid_target": lid_target, "ctc_target_probability": ctc, "evidence_families": ["WHISPER_ASR", "AUDIO_LANGUAGE_ID"], "evidence_hashes": [lid.evidence_hash], "reason": lid.reason}
+    return {"status": status, "whisper_source": whisper_source, "lid_source": lid_source, "lid_target": lid_target, "ctc_target_raw_score": raw_ctc, "ctc_target_calibrated_probability": ctc, "evidence_families": ["WHISPER_ASR", "AUDIO_LANGUAGE_ID"], "evidence_hashes": [lid.evidence_hash], "reason": lid.reason}
 
 
 def _evidence(status, language, probabilities, backend_id, model_id, revision, digest, duration, sample_rate, speech_ratio, reason):

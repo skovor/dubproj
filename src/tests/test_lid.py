@@ -2,6 +2,7 @@ from __future__ import annotations
 import tempfile, unittest
 from pathlib import Path
 from dubbing_pipeline.lid import LIDPolicy, independent_lid, fuse_language_evidence
+from dubbing_pipeline.calibration.lid_features import LID_FEATURES, features
 
 class Backend:
     backend_id="speechbrain-ecapa"; model_id="voxlingua107"; model_revision="r1"
@@ -20,5 +21,10 @@ class LIDTests(unittest.TestCase):
     def test_ctc_conflict_is_not_leak(self):
         with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=1, speech_ratio=.8, sample_rate=48000, audio_sha256="a"*64)
         result=fuse_language_evidence(whisper_language="en", whisper_probability=.9, lid=evidence, ctc_target_probability=.9, policy=LIDPolicy()); self.assertEqual(result["status"], "EVIDENCE_CONFLICT")
+    def test_lid_feature_names_separate_raw_and_calibrated_ctc(self):
+        value = features({"probabilities": {"en": .1, "de": .9}, "whisper_target_probability": .8, "ctc_target_raw_score": 2.5, "ctc_target_calibrated_probability": .7, "duration_seconds": 1, "speech_ratio": .8})
+        self.assertEqual(set(value), set(LID_FEATURES))
+        self.assertEqual(value["ctc_target_raw_score"], 2.5)
+        self.assertNotIn("ctc_target_probability", value)
 
 if __name__ == "__main__": unittest.main()
