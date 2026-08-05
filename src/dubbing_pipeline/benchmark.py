@@ -18,6 +18,8 @@ class BenchmarkManifest:
     commit: str
     topology: str
     real_audio: bool = False
+    content_hashes: dict[str, str] = field(default_factory=dict)
+    runner_identity: str = ""
 
     def __post_init__(self):
         if not self.benchmark_id or not self.line_ids: raise ValueError("benchmark must contain line IDs")
@@ -27,6 +29,19 @@ class BenchmarkManifest:
 
     def to_dict(self): return dict(self.__dict__)
     def digest(self): return hashlib.sha256(json.dumps(self.to_dict(),sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
+    @classmethod
+    def from_paths(cls, **values: Any) -> "BenchmarkManifest":
+        """Build a manifest whose identity includes every input byte hash."""
+        line_ids=tuple(values["line_ids"]); audio_paths=tuple(values["audio_paths"]); reference_paths=tuple(values["reference_paths"])
+        hashes={}
+        for label, paths in (("audio", audio_paths), ("reference", reference_paths)):
+            for line_id, path in zip(line_ids, paths):
+                hashes[f"{label}:{line_id}"]=hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        hashes["model_lock"]=hashlib.sha256(Path(values["model_lock"]).read_bytes()).hexdigest()
+        hashes["runtime_lock"]=hashlib.sha256(Path(values["runtime_lock"]).read_bytes()).hexdigest()
+        values={**values,"line_ids":line_ids,"audio_paths":audio_paths,"reference_paths":reference_paths,"content_hashes":hashes}
+        return cls(**values)
 
 @dataclass(frozen=True)
 class BenchmarkResult:
@@ -49,9 +64,24 @@ def validate_manifest(manifest: BenchmarkManifest, *, require_files: bool = True
     if require_files:
         for path in (*manifest.audio_paths,*manifest.reference_paths,manifest.model_lock,manifest.runtime_lock):
             if not Path(path).is_file(): missing.append(path)
-    return {"valid":not missing,"missing":missing,"manifest_digest":manifest.digest(),"real_audio":manifest.real_audio}
+    observed={}
+    if require_files and not missing:
+        for label, paths in (("audio", manifest.audio_paths), ("reference", manifest.reference_paths)):
+            for line_id, path in zip(manifest.line_ids, paths):
+                observed[f"{label}:{line_id}"]=hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        observed["model_lock"]=hashlib.sha256(Path(manifest.model_lock).read_bytes()).hexdigest()
+        observed["runtime_lock"]=hashlib.sha256(Path(manifest.runtime_lock).read_bytes()).hexdigest()
+        if not manifest.content_hashes:
+            missing.append("content_hashes")
+        else:
+            for key, value in observed.items():
+                if manifest.content_hashes.get(key) != value:
+                    missing.append(f"content_hash_mismatch:{key}")
+    return {"valid":not missing,"missing":missing,"manifest_digest":manifest.digest(),"real_audio":manifest.real_audio,"content_hashes":observed}
 
 def run_benchmark(manifest: BenchmarkManifest, runner: Callable[[str, str, str], Mapping[str, Any]], *, require_files: bool = True) -> BenchmarkResult:
+    if not callable(runner):
+        raise TypeError("a real pipeline runner is required; fixed/mock runners are forbidden")
     validation=validate_manifest(manifest,require_files=require_files)
     if not validation["valid"]: raise ValueError(f"benchmark manifest has missing files: {validation['missing']}")
     started=time.perf_counter(); passed=failed=blocked=0; stage_time={}; quality=[]
