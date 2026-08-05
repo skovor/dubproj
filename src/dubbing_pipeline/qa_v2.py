@@ -637,6 +637,10 @@ def calibration_profile_status(
     identity = profile.get("identity")
     thresholds = profile.get("thresholds")
     calibrators = profile.get("calibrators")
+    if not isinstance(calibrators, Mapping) or set(calibrators) != {"target", "final_anchor", "lid"}:
+        return "BLOCKED_SCHEMA"
+    if "language_id" in calibrators:
+        return "BLOCKED_SCHEMA"
     calibrator = calibrators.get("target") if isinstance(calibrators, Mapping) else None
     final_anchor_calibrator = calibrators.get("final_anchor") if isinstance(calibrators, Mapping) else None
     dataset = profile.get("dataset")
@@ -684,7 +688,9 @@ def calibration_profile_status(
         except OSError:
             return "BLOCKED_CALIBRATOR_ARTIFACT"
         expected_schema = "final-anchor-v1" if role == "final_anchor" else (_LID_FEATURE_SCHEMA_VERSION if role == "lid" else feature_schema_version)
-        if str(spec.get("feature_schema_version", "")) != expected_schema or not all(str(spec.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
+        if str(spec.get("feature_schema_version", "")) != expected_schema:
+            return "BLOCKED_CALIBRATOR_SCHEMA"
+        if not all(str(spec.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
             return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
         loaded, _loaded_path, executable_status = _load_calibrator_artifact(
             profile,

@@ -19,7 +19,7 @@ omnivoice = ["torch", "torchaudio"]
 cri = ["wannacri"]
 all = ["numpy>=1.24", "soundfile>=0.12", "librosa>=0.10", "faster-whisper>=1.0", "pyloudnorm>=0.1", "torch", "torchaudio", "whisperx>=3.3", "speechbrain>=1.0"]
 alignment = ["whisperx>=3.3", "speechbrain>=1.0"]
-dev = ["pytest>=8", "coverage>=7"]
+dev = ["pytest>=8", "coverage>=7", "jsonschema>=4.20"]
 
 [tool.setuptools.packages.find]
 where = ["."]
