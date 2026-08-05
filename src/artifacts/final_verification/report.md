@@ -2,7 +2,7 @@
 
 **Estado:** `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`
 
-Codigo auditado: `e0f768676ded243f8624ef164a375bb773389a9e` en
+Codigo auditado: `cca8466f072a71cb38f921d5f2b115fe0da7f474` en
 `refactor/p3r-pipeline-v2`. La matriz completa esta en `report.json`.
 
 ## Pruebas reproducibles
@@ -13,7 +13,7 @@ Codigo auditado: `e0f768676ded243f8624ef164a375bb773389a9e` en
 - `pip check`: `No broken requirements found`.
 - `compileall`, smoke, V2, portabilidad e instrucciones: todos `returncode=0` en el release check.
 
-## Cierre AD1EDDB: cuatro commits atomicos
+## Cierre AD1EDDB: cuatro commits atomicos + hotfix de integridad
 
 | Commit | Correccion | Evidencia |
 |---|---|---|
@@ -21,6 +21,7 @@ Codigo auditado: `e0f768676ded243f8624ef164a375bb773389a9e` en
 | `e4f1d9a56739f61249a13743ad0cb350872e2eb6` | SHA exacto de calibracion antes de TTS e identidad unica de alineador | 75/75 tests afectados |
 | `3009e7b9855570ae8095864ace75d055fdec3c1d` | Recibo de invocacion de escena y atestacion Ed25519; booleanos rechazados | 26/26 tests afectados |
 | `e0f768676ded243f8624ef164a375bb773389a9e` | Decodificacion y procedencia content-addressed del segundo juego | 172 pytest; 150 unittest |
+| `cca8466f072a71cb38f921d5f2b115fe0da7f474` | Hotfix: el SHA esperado debe coincidir con el checkout que ejecuta TTS | 68 focused pytest; suite completa repetida |
 
 Los cuatro hallazgos nuevos de la auditoria estan `VERIFIED` en `report.json`. La
 dependencia de firma esta declarada en `src/pyproject.toml` y fijada en

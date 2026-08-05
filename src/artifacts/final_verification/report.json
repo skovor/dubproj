@@ -1,7 +1,7 @@
 {
   "schema": "dubproj-final-verification-v1",
   "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
-  "validated_code_commit": "e0f768676ded243f8624ef164a375bb773389a9e",
+  "validated_code_commit": "cca8466f072a71cb38f921d5f2b115fe0da7f474",
   "ci": {
     "workflow": ".github/workflows/ci.yml",
     "workflow_commit": "878c140a05d0184b2f86bde745556725698209c0",
@@ -69,6 +69,7 @@
       {"sha": "e4f1d9a56739f61249a13743ad0cb350872e2eb6", "subject": "Require exact calibration identity in production", "tests": "75/75 affected unittest tests"},
       {"sha": "3009e7b9855570ae8095864ace75d055fdec3c1d", "subject": "Replace benchmark self attestation with signed scene evidence", "tests": "26/26 affected unittest tests"},
       {"sha": "e0f768676ded243f8624ef164a375bb773389a9e", "subject": "Decode second game assets and require extraction provenance", "tests": "172 pytest passed; 150 unittest passed"}
+      ,{"sha": "cca8466f072a71cb38f921d5f2b115fe0da7f474", "subject": "Enforce runtime commit parity in production preflight", "tests": "68 focused pytest passed; full suite repeated"}
     ],
     "findings": [
       {"id": "P0.1", "status": "VERIFIED", "evidence": "GoldsetStore.hidden_finalizations, finalize_hidden_evaluation, verify_hidden_evaluation_finalization and consume_hidden_finalization; test_hidden_finalization_is_authoritative_exact_and_one_shot"},
