@@ -39,10 +39,17 @@ class P3RAdapter:
     def runtime_destinations(self, asset_name: str) -> list[Path]:
         if self.config.runtime_root is None:
             raise RuntimeError("P3R runtime_root is not configured")
-        return [self.config.runtime_root / asset_name]
+        root=self.config.runtime_root.resolve(); destination=(root / asset_name).resolve()
+        if destination != root and root not in destination.parents:
+            raise ValueError(f"runtime asset escapes configured root: {asset_name}")
+        return [destination]
 
     def runtime_smoke(self) -> dict[str, Any]:
-        return {"status": "NOT_RUN", "reason": "game runtime smoke requires explicit external invocation", "runtime_root": str(self.config.runtime_root) if self.config.runtime_root else None}
+        if self.config.runtime_root is None:
+            return {"status": "BLOCKED", "reason": "runtime_root_not_configured"}
+        if not self.config.runtime_root.exists():
+            return {"status": "BLOCKED", "reason": "runtime_root_missing", "runtime_root": str(self.config.runtime_root)}
+        return {"status": "BLOCKED", "reason": "game_runtime_smoke_requires_explicit_external_invocation", "runtime_root": str(self.config.runtime_root)}
 
 
 __all__ = ["P3RAdapter", "P3RAdapterConfig"]
