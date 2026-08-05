@@ -16,9 +16,10 @@ class ValidationReport:
     false_fail_count: int
     predictions: tuple[dict, ...]
     run_id: str = ""
+    recomputed: bool = False
 
     def to_dict(self) -> dict:
-        return {"split": self.split, "count": self.count, "brier_score": self.brier_score, "expected_calibration_error": self.expected_calibration_error, "false_pass_count": self.false_pass_count, "false_fail_count": self.false_fail_count, "predictions": [dict(row) for row in self.predictions], "run_id": self.run_id}
+        return {"split": self.split, "count": self.count, "brier_score": self.brier_score, "expected_calibration_error": self.expected_calibration_error, "false_pass_count": self.false_pass_count, "false_fail_count": self.false_fail_count, "predictions": [dict(row) for row in self.predictions], "run_id": self.run_id, "recomputed": self.recomputed}
 
 
 def predict_artifact(artifact: CalibrationArtifact | Mapping, features: Mapping[str, float]) -> float:
@@ -42,7 +43,7 @@ def evaluate(artifact: CalibrationArtifact | Mapping, rows: Iterable[FeatureRow]
     false_pass = sum(1 for item in predictions if item["label"] == 0 and item["probability"] >= pass_probability)
     false_fail = sum(1 for item in predictions if item["label"] == 1 and item["probability"] <= fail_probability)
     ece = _ece(predictions)
-    return ValidationReport(split, len(rows), brier, ece, false_pass, false_fail, predictions, run_id)
+    return ValidationReport(split, len(rows), brier, ece, false_pass, false_fail, predictions, run_id, True)
 
 
 def _ece(rows: Iterable[Mapping]) -> float:
