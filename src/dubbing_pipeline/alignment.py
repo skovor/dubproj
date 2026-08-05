@@ -240,10 +240,29 @@ def _record(
 
 
 def _raw_char_segments(value: Mapping[str, Any], words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract WhisperX's native character rows without inventing timing.
+
+    WhisperX has emitted character alignments in two shapes across releases:
+    directly on the result/segment and nested below words.  The canonical
+    result is ``result["segments"][i]["chars"]``; it must be preferred over
+    word fallbacks because the segment rows carry the authoritative CTC
+    boundaries.  Missing rows remain missing so downstream QA cannot turn a
+    parser miss into a false calibrated PASS.
+    """
     rows = value.get("char_segments", value.get("charSegments"))
     if isinstance(rows, list):
         return [dict(item) for item in rows if isinstance(item, Mapping)]
     rows = []
+    segments = value.get("segments")
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, Mapping):
+                continue
+            nested = segment.get("chars", segment.get("char_segments", segment.get("charSegments")))
+            if isinstance(nested, list):
+                rows.extend(dict(item) for item in nested if isinstance(item, Mapping))
+        if rows:
+            return rows
     for word in words:
         nested = word.get("chars", word.get("char_segments", word.get("charSegments", [])))
         if isinstance(nested, list):

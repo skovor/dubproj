@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from dubbing_pipeline.alignment import AlignmentCache, AlignmentTextPolicy, _character_evidence, contrastive_align, normalize_alignment_text
-from dubbing_pipeline.alignment import _extract_mfa_words
+from dubbing_pipeline.alignment import _extract_mfa_words, _raw_char_segments
 from dubbing_pipeline.contracts import ContractError, DeliveryWindow, EvidenceFamily, GateStatus, ReferenceEvidence
 from dubbing_pipeline.contracts.manifest import validate_manifest_value
 from dubbing_pipeline.deploy_v2 import DeploymentError, PackageEntry, deploy_atomic_v2, stage_files_v2
@@ -623,6 +623,16 @@ class V2QATests(unittest.TestCase):
         self.assertEqual(result["native_char_coverage"], 1.0)
         self.assertEqual(len(result["char_segments"]), 5)
         self.assertNotIn("final_anchor_present", result)
+
+    def test_whisperx_official_segment_chars_are_used_before_word_fallback(self):
+        segment_chars = [{"char": char, "start": index * .04, "end": (index + 1) * .04, "score": .8} for index, char in enumerate("Sorge")]
+        value = {
+            "segments": [{"start": 0.0, "end": .2, "chars": segment_chars}],
+            "word_segments": [{"word": "Sorge", "chars": [{"char": "X", "start": 0.0, "end": .1, "score": .1}]}],
+        }
+        rows = _raw_char_segments(value, list(value["word_segments"]))
+        self.assertEqual("".join(row["char"] for row in rows), "Sorge")
+        self.assertEqual(rows[0]["start"], 0.0)
 
     def test_line_summary_does_not_use_first_candidate_as_authority(self):
         class Candidate:
