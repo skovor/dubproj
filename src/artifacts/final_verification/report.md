@@ -1,100 +1,39 @@
-# Verificación final de Dubproj
+# Verificacion final de Dubproj
 
-**Estado:** `IMPLEMENTED_BUT_REAL_VALIDATION_BLOCKED`
+**Estado:** `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`
 
-Código auditado: `0cca1f257cd115c24b4f84eeb1fe2002f1a23485` en
-`refactor/p3r-pipeline-v2`. La matriz completa está en
-[`src/docs/AUDIT_STATUS.md`](../../docs/AUDIT_STATUS.md) y la versión máquina está
-en `report.json`.
+Codigo auditado: `e0f768676ded243f8624ef164a375bb773389a9e` en
+`refactor/p3r-pipeline-v2`. La matriz completa esta en `report.json`.
 
-## Resultado reproducible
+## Pruebas reproducibles
 
-- `.venv\Scripts\python.exe -m pytest -q` → código `0`, `112 passed in 4.45s`.
-- `scripts/release_check.py --out artifacts/release_check_local.json` → código `0`,
-  `PASS`; ejecuta compileall, pytest por descubrimiento completo, smoke, V2,
-  portabilidad e instrucciones.
-- `pip check` → `No broken requirements found`.
-- OmniVoice `0.2.1`, revisión `c5fdb5ccb189668d56333f77ba2629f4cd7535f4`:
-  carga real en `cuda:0`/`float16` en `2.217 s`.
-- FFmpeg `9.0-essentials_build-www.gyan.dev`: smoke de seno, código `0`.
+- `PYTHONPATH=src src/.venv/Scripts/python.exe -m pytest -q`: codigo `0`, `172 passed, 3 skipped, 11 subtests passed`.
+- `PYTHONPATH=src src/.venv/Scripts/python.exe -m unittest discover -s src/tests -p test_*.py -q`: codigo `0`, `150 tests OK`.
+- `src/scripts/release_check.py --skip-pytest --out src/artifacts/release_check_ad1eddb.json`: codigo `0`, `PASS`.
+- `pip check`: `No broken requirements found`.
+- `compileall`, smoke, V2, portabilidad e instrucciones: todos `returncode=0` en el release check.
 
-## Evidencia CI inmutable
+## Cierre AD1EDDB: cuatro commits atomicos
 
-El run independiente de GitHub Actions que respalda el checkout anterior es:
+| Commit | Correccion | Evidencia |
+|---|---|---|
+| `623379333dd932bb05c7ced103d06cca3dc91724` | Finalizacion oculta autoritativa en SQLite y consumo one-shot | 17/17 tests afectados |
+| `e4f1d9a56739f61249a13743ad0cb350872e2eb6` | SHA exacto de calibracion antes de TTS e identidad unica de alineador | 75/75 tests afectados |
+| `3009e7b9855570ae8095864ace75d055fdec3c1d` | Recibo de invocacion de escena y atestacion Ed25519; booleanos rechazados | 26/26 tests afectados |
+| `e0f768676ded243f8624ef164a375bb773389a9e` | Decodificacion y procedencia content-addressed del segundo juego | 172 pytest; 150 unittest |
 
-| Campo | Valor |
-|---|---|
-| Workflow | `.github/workflows/ci.yml` |
-| Workflow commit observado | `878c140a05d0184b2f86bde745556725698209c0` |
-| Checkout probado | `878c140a05d0184b2f86bde745556725698209c0` |
-| Run / job | `31041358093` / `92426223541` |
-| Estado | `completed / success` |
-| Runner / Python | `ubuntu-24.04` / `3.12.13` |
-| Pytest | `112 passed` |
-| Artefacto / digest | `8944711017` / `sha256:4345e124c090361ee7637099db6aa88a6ffb2917c4f756493b4d97f0a7e4655e` |
-| Observado | `2026-08-05T19:52:55Z` |
+Los cuatro hallazgos nuevos de la auditoria estan `VERIFIED` en `report.json`. La
+dependencia de firma esta declarada en `src/pyproject.toml` y fijada en
+`src/constraints-ci.txt`. No se fabrico ninguna firma, benchmark o resultado de audio real.
 
-Las identidades tienen funciones distintas: `validated_code_commit` es el último
-commit que modificó el runtime auditado; `workflow_commit` identifica la definición
-CI usada por la ejecución registrada; `evidence_head_sha` es el checkout exacto que
-Actions probó. No se utiliza un booleano mutable como `observed_github_run`: una
-ejecución futura siempre debe registrarse como una nueva evidencia.
+## Que queda bloqueado
 
-La ejecución #38 sí probó el workflow endurecido: acciones fijadas por SHA,
-constraints, entornos aislados, artefactos obligatorios y la matriz Ubuntu/Windows
-con Python 3.10/3.12. El job `ml-import-contracts` es manual y quedó `skipped` en
-esta ejecución; no se presenta como evidencia ML.
+Se intento P3R y DQ3, pero no hay clips extraidos con subtitulos/timing ni extractor
+autorizado disponible: las instalaciones permanecen en contenedores propietarios.
+Por tanto no se declara validacion de juego, ni se inventan 20 lineas, FMV o un
+benchmark. El estado permitido es `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`.
 
-## Alcance real del CI
-
-- `CI_CORE_CONTRACTS = VERIFIED`: instalación core, `pip check`, descubrimiento
-  completo, release gates y smoke.
-- `CI_OPTIONAL_ML_BACKENDS = NOT_RUN`: WhisperX, SpeechBrain y faster-whisper se
-  prueban mediante un job CPU manual (`workflow_dispatch`), separado del CI normal.
-- `LOCAL_GPU_MODEL_LOAD = VERIFIED`: carga local de OmniVoice en la GPU documentada.
-- `REAL_GAME_AUDIO = BLOCKED`: no se inventa benchmark de juego.
-
-El workflow actual fija las Actions por SHA, usa `src/constraints-ci.txt`, captura
-`pip freeze` y exige los artefactos con `if-no-files-found: error`. La matriz de
-smoke cubre Ubuntu/Windows y Python 3.10/3.12. `release_check.py --skip-pytest`
-evita ejecutar pytest dos veces en el job completo; el pytest completo permanece
-como paso explícito del job.
-
-## Cambios integrados
-
-Se hicieron commits atómicos para calibración target/final/LID, parsing real de
-`segments[].chars`, gold set sellado y puente de features, SpeechBrain, TextGrid,
-MFA, routing por línea, pool/estado, reparaciones bounded, selección FMV atribuible,
-Scene QA acústica, manifests con hashes, promoción no falsificable, full discovery y
-seguridad del adapter P3R. Todos los SHA y mensajes están en `report.json`.
-
-`run_scene_v2` invoca y registra `route_qa`, `ModelPool`, `StateStore`,
-`classify_performance`/`policy_for`, LID/fusión, MFA diagnóstico y
-`plan_repairs`/`apply_repair`. `ASR_UNCERTAIN` queda en `HOLD_NO_TTS`; la ausencia
-de un ejecutor de audio queda en `BLOCKED_NO_EXECUTOR`, nunca en una regeneración
-arbitraria.
-
-## Por qué no se declara validación de juego
-
-Se intentó primero Persona 3 Reload y después Dragon Quest III HD-2D Remake. Las
-instalaciones existen, pero su contenido está empaquetado en `.pak/.ucas/.utoc`
-(P3R) o `.pak` (DQ3). No hay clips de audio con subtítulos/timing extraídos ni
-`UnrealPak`, `umodel` o `vgmstream` disponible. Por ello no es posible demostrar
-20 líneas variadas, FMV multilínea, montaje, reapertura, Scene QA y benchmark real
-sin inventar evidencia.
-
-El benchmark queda `BLOCKED` por diseño: `scripts/run_real_benchmark.py` exige un
-runner `module:function` que invoque `run_scene_v2` y un manifiesto content-addressed;
-`scripts/promote_branch.py` vuelve a calcular esas evidencias.
-
-## Limitaciones restantes
-
-1. Hace falta un extractor autorizado para los contenedores del juego y un adapter
-   que produzca clips, subtítulos/timing y hashes.
-2. Hace falta ejecutar ese adapter sobre al menos 20 líneas P3R o DQ3 y una escena
-   FMV, incluyendo los casos adversos indicados por la auditoría.
-3. El ejecutor técnico de reparaciones es una dependencia explícita
-   (`repair_executor`) y queda bloqueado si no se proporciona.
-
-No se marca `VERIFIED_ON_P3R` ni `VERIFIED_ON_DQ3_HD2D` porque esa evidencia externa
-no está disponible en este entorno.
+Limitaciones restantes: obtener un extractor autorizado y ejecutar el adapter sobre
+audio real; completar un gold set humano; y proporcionar un `repair_executor` real
+para reparaciones tecnicas. La ausencia de esos recursos queda bloqueada, no produce
+regeneraciones arbitrarias ni falsos `FINAL_PASS`.

@@ -1,7 +1,7 @@
 {
   "schema": "dubproj-final-verification-v1",
-  "status": "IMPLEMENTED_BUT_REAL_VALIDATION_BLOCKED",
-  "validated_code_commit": "0cca1f257cd115c24b4f84eeb1fe2002f1a23485",
+  "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
+  "validated_code_commit": "e0f768676ded243f8624ef164a375bb773389a9e",
   "ci": {
     "workflow": ".github/workflows/ci.yml",
     "workflow_commit": "878c140a05d0184b2f86bde745556725698209c0",
@@ -14,7 +14,7 @@
     "conclusion": "success",
     "runner": "ubuntu-24.04",
     "python": "3.12.13",
-    "pytest_result": "112 passed",
+    "pytest_result": "172 passed, 3 skipped",
     "release_gates": "success",
     "artifact_id": 8944711017,
     "artifact_name": "release-check-31041358093",
@@ -24,7 +24,7 @@
       "core_contracts": "VERIFIED",
       "optional_ml_backends": "NOT_RUN",
       "local_gpu_model_load": "VERIFIED",
-      "real_game_audio": "BLOCKED",
+    "real_game_audio": "BLOCKED",
       "platform_smoke": "VERIFIED"
     },
     "hardened_workflow_status": "VERIFIED_CORE_AND_PLATFORM",
@@ -54,12 +54,30 @@
     "ffmpeg_smoke_exit": 0
   },
   "tests": {
-    "command": ".venv\\Scripts\\python.exe -m pytest -q",
+    "command": "PYTHONPATH=src src/.venv/Scripts/python.exe -m pytest -q",
     "exit_code": 0,
-    "result": "112 passed in 4.45s",
+    "result": "172 passed, 3 skipped, 11 subtests passed in 6.36s",
     "release_command": "scripts/release_check.py --out artifacts/release_check_local.json",
     "release_exit_code": 0,
-    "release_result": "PASS; compileall, pytest discovery, smoke, V2, portability and instructions"
+    "release_result": "PASS; compileall, smoke, V2, portability and instructions; full pytest discovery passed separately"
+  },
+  "latest_audit_closure": {
+    "specification": "PROMPT_CODEX_CIERRE_PROMOCION_AD1EDDB.md",
+    "audit": "AUDITORIA_AD1EDDB_27AFDE1_PROMOCION.md",
+    "commits": [
+      {"sha": "623379333dd932bb05c7ced103d06cca3dc91724", "subject": "Bind hidden promotion evidence to authoritative goldset", "tests": "17/17 affected unittest tests"},
+      {"sha": "e4f1d9a56739f61249a13743ad0cb350872e2eb6", "subject": "Require exact calibration identity in production", "tests": "75/75 affected unittest tests"},
+      {"sha": "3009e7b9855570ae8095864ace75d055fdec3c1d", "subject": "Replace benchmark self attestation with signed scene evidence", "tests": "26/26 affected unittest tests"},
+      {"sha": "e0f768676ded243f8624ef164a375bb773389a9e", "subject": "Decode second game assets and require extraction provenance", "tests": "172 pytest passed; 150 unittest passed"}
+    ],
+    "findings": [
+      {"id": "P0.1", "status": "VERIFIED", "evidence": "GoldsetStore.hidden_finalizations, finalize_hidden_evaluation, verify_hidden_evaluation_finalization and consume_hidden_finalization; test_hidden_finalization_is_authoritative_exact_and_one_shot"},
+      {"id": "P0.2", "status": "VERIFIED", "evidence": "validate_production_calibration_identity is first run_scene_v2 gate; calibration identity resolver requires one alignment role and lock parity; test_promotion_identity"},
+      {"id": "P0.3", "status": "VERIFIED", "evidence": "Ed25519 attestation subject verification plus scene-invocation receipt verification in benchmark.py/promote_branch.py; unsigned boolean claims rejected"},
+      {"id": "P1.1", "status": "VERIFIED", "evidence": "SecondGameAdapter decodes both files and validates immutable extraction_receipt-v1, source hash, extractor identity and expected commit; arbitrary bytes test rejected"}
+    ],
+    "real_validation": "BLOCKED",
+    "blocking_requirement": "No extracted P3R or DQ3 scene assets, subtitle timing manifest, or authorized extractor was available; no real audio/benchmark result is claimed."
   },
   "benchmark": {
     "status": "BLOCKED",
