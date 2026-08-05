@@ -49,8 +49,8 @@ def extract_goldset_features(
     run the actual ASR/CTC/LID stack and return its content-addressed output;
     this bridge never invents scores or converts a pipeline verdict to a label.
     """
-    clips = store.clips(); labels = store.labels(); seal = store.hidden_seal()
-    validation = validate_goldset(clips, labels, require_double_review=True, hidden_sealed=bool(seal))
+    clips = store.clips(); reviewer_labels = store.labels(); labels = store.effective_labels(); seal = store.hidden_seal()
+    validation = validate_goldset(clips, reviewer_labels, require_double_review=True, hidden_sealed=bool(seal))
     if not validation["valid"]:
         raise ValueError("gold set is not ready: " + "; ".join(validation["errors"]))
     if require_hidden_seal and any(clip.split == "hidden_test" for clip in clips) and seal is None:
@@ -67,7 +67,7 @@ def extract_goldset_features(
         lid_evidence = evidence.get("lid")
         target = target_features(target_evidence, performance_mode=clip.performance_mode)
         final = final_anchor_features(final_evidence)
-        base_meta = {"audio_sha256": clip.audio_sha256, "clip_id": clip.clip_id, "label_hash": sha256_bytes(canonical_json([row.to_dict() for row in clip_labels])), "evidence_hash": sha256_bytes(canonical_json(evidence)), "source": "human_goldset"}
+        base_meta = {"audio_sha256": clip.audio_sha256, "clip_id": clip.clip_id, "label_hash": sha256_bytes(canonical_json([row.to_dict() for row in clip_labels])), "evidence_hash": sha256_bytes(canonical_json(evidence)), "source": "human_goldset", "label_authority": "adjudicated_consensus" if any(row.adjudicated_by for row in clip_labels) else "double_review"}
         target_rows.append(FeatureRow(clip.clip_id, clip.split, clip.split_group, _label_for(clip_labels, TARGET_BAD), target, clip.performance_mode, base_meta).to_dict())
         final_rows.append(FeatureRow(clip.clip_id, clip.split, clip.split_group, _label_for(clip_labels, FINAL_BAD), final, clip.performance_mode, base_meta).to_dict())
         if lid_evidence is None:

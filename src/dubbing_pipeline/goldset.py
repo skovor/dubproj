@@ -269,18 +269,45 @@ class GoldsetStore:
             result.append(HumanLabel(**value))
         return result
 
+    def effective_labels(self) -> list[HumanLabel]:
+        """Return one authoritative label per clip for calibration.
+
+        Reviewer rows remain available through :meth:`labels` as the audit
+        trail.  Once an adjudication exists it is the only label consumed by
+        feature extraction; silently unioning conflicting reviewer labels
+        would manufacture a negative from a disagreement that a lead already
+        resolved.
+        """
+        reviewer_labels = self.labels()
+        adjudications = {
+            row["clip_id"]: (str(row["adjudicator_id"]), tuple(json.loads(row["consensus_labels"])))
+            for row in self._db.execute("SELECT clip_id, adjudicator_id, consensus_labels FROM adjudications")
+        }
+        by_clip: dict[str, list[HumanLabel]] = {}
+        for label in reviewer_labels:
+            by_clip.setdefault(label.clip_id, []).append(label)
+        result: list[HumanLabel] = []
+        for clip_id in sorted(by_clip):
+            if clip_id in adjudications:
+                adjudicator, consensus = adjudications[clip_id]
+                result.append(HumanLabel(clip_id, f"adjudicator:{adjudicator}", labels=consensus, adjudicated_by=adjudicator))
+            else:
+                result.extend(by_clip[clip_id])
+        return result
+
     def export(self, directory: str | Path, *, include_hidden: bool = False) -> dict[str, str]:
         root = Path(directory); root.mkdir(parents=True, exist_ok=True)
-        clips = self.clips(); labels = self.labels()
+        clips = self.clips(); labels = self.labels(); effective = self.effective_labels()
         hidden = [clip for clip in clips if clip.split == "hidden_test"]
         seal = self.hidden_seal()
         if hidden and seal is None:
             raise ValueError("hidden test must be sealed before export")
         if not include_hidden:
             labels = [label for label in labels if next((clip.split for clip in clips if clip.clip_id == label.clip_id), "") != "hidden_test"]
-        paths = {"manifest": root / "manifest.jsonl", "labels": root / "labels.jsonl", "splits": root / "splits.json", "reviewers": root / "reviewers.json", "disagreements": root / "disagreements.jsonl"}
+        paths = {"manifest": root / "manifest.jsonl", "labels": root / "labels.jsonl", "effective_labels": root / "effective_labels.jsonl", "splits": root / "splits.json", "reviewers": root / "reviewers.json", "disagreements": root / "disagreements.jsonl"}
         paths["manifest"].write_text("".join(canonical_json(c.to_dict()) + "\n" for c in clips), encoding="utf-8")
         paths["labels"].write_text("".join(canonical_json(l.to_dict()) + "\n" for l in labels), encoding="utf-8")
+        paths["effective_labels"].write_text("".join(canonical_json(l.to_dict()) + "\n" for l in effective if include_hidden or next((clip.split for clip in clips if clip.clip_id == l.clip_id), "") != "hidden_test"), encoding="utf-8")
         split_map = {c.clip_id: {"split": c.split, "split_group": c.split_group} for c in clips}
         atomic_json(paths["splits"], split_map)
         reviewers = sorted({l.reviewer_id for l in labels}); atomic_json(paths["reviewers"], {"reviewers": reviewers})
