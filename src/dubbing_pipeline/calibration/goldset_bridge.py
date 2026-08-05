@@ -75,9 +75,22 @@ def extract_goldset_features(
         lid = lid_features(lid_evidence, performance_mode=clip.performance_mode)
         lid_rows.append(LIDFeatureRow(clip.clip_id, clip.split, clip.split_group, 1 if "SOURCE_LANGUAGE_LEAK" in {item for row in clip_labels for item in row.labels} else 0, lid, clip.performance_mode, base_meta).to_dict())
     root = Path(output_dir)
+    rows_by_role = {"target": target_rows, "final_anchor": final_rows, "lid": lid_rows}
+    # Keep a complete diagnostic file, but make every training/evaluation
+    # split independently addressable.  Callers that train a calibrator can
+    # therefore pass only ``*_calibration.jsonl`` and cannot accidentally
+    # include validation or hidden rows through a glob.
     paths = {"target": root / "target_features.jsonl", "final_anchor": root / "final_anchor_features.jsonl", "lid": root / "lid_features.jsonl"}
-    digests = {key: _write_jsonl(path, rows) for key, path, rows in (("target", paths["target"], target_rows), ("final_anchor", paths["final_anchor"], final_rows), ("lid", paths["lid"], lid_rows))}
-    return {"schema": "goldset-feature-bridge-v1", "paths": {key: str(path) for key, path in paths.items()}, "sha256": digests, "counts": {"target": len(target_rows), "final_anchor": len(final_rows), "lid": len(lid_rows)}, "hidden_seal": seal}
+    digests = {role: _write_jsonl(paths[role], rows) for role, rows in rows_by_role.items()}
+    paths_by_split: dict[str, dict[str, str]] = {}
+    sha_by_split: dict[str, dict[str, str]] = {}
+    for role, rows in rows_by_role.items():
+        for split in ("calibration", "validation", "hidden_test"):
+            path = root / f"{role}_{split}.jsonl"
+            split_rows = [row for row in rows if row.get("split") == split]
+            paths_by_split.setdefault(role, {})[split] = str(path)
+            sha_by_split.setdefault(role, {})[split] = _write_jsonl(path, split_rows)
+    return {"schema": "goldset-feature-bridge-v2", "paths": {key: str(path) for key, path in paths.items()}, "paths_by_split": paths_by_split, "sha256": digests, "sha256_by_split": sha_by_split, "counts": {"target": len(target_rows), "final_anchor": len(final_rows), "lid": len(lid_rows)}, "counts_by_split": {role: {split: sum(1 for row in rows if row.get("split") == split) for split in ("calibration", "validation", "hidden_test")} for role, rows in rows_by_role.items()}, "hidden_seal": seal}
 
 
 __all__ = ["extract_goldset_features"]
