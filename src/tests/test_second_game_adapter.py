@@ -2,7 +2,7 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
-from dubbing_pipeline.benchmark import BenchmarkManifest, run_benchmark
+from dubbing_pipeline.benchmark import BenchmarkManifest, run_benchmark, trusted_runner_identity, validate_manifest
 from adapters.second_game_template import SecondGameAdapter
 
 class FinalValidationTests(unittest.TestCase):
@@ -25,5 +25,11 @@ class FinalValidationTests(unittest.TestCase):
             self.assertTrue(validate_manifest(manifest)["valid"])
             files["audio.wav"].write_bytes(b"changed")
             self.assertFalse(validate_manifest(manifest)["valid"])
+
+    def test_trusted_benchmark_rejects_fixed_runner(self):
+        manifest = BenchmarkManifest("b", ("l1",), ("audio",), ("ref",), "models", "runtime", None, "config", "commit", "LINE_SEPARATED", True)
+        with self.assertRaises(ValueError):
+            run_benchmark(manifest, lambda *_: {"status": "PASS"}, require_files=False, require_trusted_runner=True)
+        self.assertFalse(validate_manifest(manifest, require_files=False)["real_audio"])
 
 if __name__=="__main__": unittest.main()

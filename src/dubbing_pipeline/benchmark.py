@@ -1,6 +1,6 @@
 """Reproducible benchmark and promotion evidence; synthetic runs are labelled."""
 from __future__ import annotations
-import hashlib, json, time
+import hashlib, inspect, json, time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -56,6 +56,7 @@ class BenchmarkResult:
     stages: dict[str, float] = field(default_factory=dict)
     quality: dict[str, Any] = field(default_factory=dict)
     second_game: bool = False
+    runner_identity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self): return dict(self.__dict__)
 
@@ -77,16 +78,36 @@ def validate_manifest(manifest: BenchmarkManifest, *, require_files: bool = True
             for key, value in observed.items():
                 if manifest.content_hashes.get(key) != value:
                     missing.append(f"content_hash_mismatch:{key}")
-    return {"valid":not missing,"missing":missing,"manifest_digest":manifest.digest(),"real_audio":manifest.real_audio,"content_hashes":observed}
+    audio_suffixes = {".wav", ".flac", ".ogg", ".mp3", ".m4a", ".opus"}
+    derived_real_audio = bool(require_files and not missing and all(Path(path).suffix.casefold() in audio_suffixes and Path(path).stat().st_size > 44 for path in (*manifest.audio_paths, *manifest.reference_paths)))
+    return {"valid":not missing,"missing":missing,"manifest_digest":manifest.digest(),"real_audio":derived_real_audio,"declared_real_audio":bool(manifest.real_audio),"content_hashes":observed}
 
-def run_benchmark(manifest: BenchmarkManifest, runner: Callable[[str, str, str], Mapping[str, Any]], *, require_files: bool = True) -> BenchmarkResult:
+def trusted_runner_identity(runner: Callable[[str, str, str], Mapping[str, Any]]) -> dict[str, Any]:
+    """Accept only an inspectable runner that delegates to run_scene_v2."""
+    if not callable(runner):
+        raise TypeError("a callable runner is required")
+    module = str(getattr(runner, "__module__", "")); qualname = str(getattr(runner, "__qualname__", ""))
+    lowered = f"{module}:{qualname}".casefold()
+    if any(token in lowered for token in ("test", "mock", "fake", "fixture", "lambda")):
+        raise ValueError("benchmark runner identity is not production-eligible")
+    try:
+        source = inspect.getsource(runner)
+    except (OSError, TypeError) as exc:
+        raise ValueError("benchmark runner source is not inspectable") from exc
+    if "run_scene_v2" not in source:
+        raise ValueError("benchmark runner must invoke run_scene_v2")
+    return {"module": module, "qualname": qualname, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "trusted": True}
+
+
+def run_benchmark(manifest: BenchmarkManifest, runner: Callable[[str, str, str], Mapping[str, Any]], *, require_files: bool = True, require_trusted_runner: bool = False) -> BenchmarkResult:
     if not callable(runner):
         raise TypeError("a real pipeline runner is required; fixed/mock runners are forbidden")
     validation=validate_manifest(manifest,require_files=require_files)
     if not validation["valid"]: raise ValueError(f"benchmark manifest has missing files: {validation['missing']}")
+    identity = trusted_runner_identity(runner) if require_trusted_runner else {"trusted": False, "mode": "caller_supplied"}
     started=time.perf_counter(); passed=failed=blocked=0; stage_time={}; quality=[]
     for line_id,audio,reference in zip(manifest.line_ids,manifest.audio_paths,manifest.reference_paths):
         item_start=time.perf_counter(); result=dict(runner(line_id,audio,reference)); stage_time["line_total"] = stage_time.get("line_total",0.0)+(time.perf_counter()-item_start); status=str(result.get("status","BLOCKED")); passed+=status in {"PASS","FINAL_PASS"}; failed+=status in {"FAIL","FAILED"}; blocked+=status not in {"PASS","FINAL_PASS","FAIL","FAILED"}; quality.append(result)
-    elapsed=max(1e-9,time.perf_counter()-started); return BenchmarkResult(manifest.digest(),len(manifest.line_ids),elapsed,len(manifest.line_ids)/(elapsed/60),passed,failed,blocked,manifest.real_audio,stage_time,{"rows":quality},False)
+    elapsed=max(1e-9,time.perf_counter()-started); return BenchmarkResult(manifest.digest(),len(manifest.line_ids),elapsed,len(manifest.line_ids)/(elapsed/60),passed,failed,blocked,bool(validation.get("real_audio")),stage_time,{"rows":quality,"manifest_validation":validation},False,identity)
 
-__all__=["BenchmarkManifest","BenchmarkResult","validate_manifest","run_benchmark"]
+__all__=["BenchmarkManifest","BenchmarkResult","validate_manifest","trusted_runner_identity","run_benchmark"]

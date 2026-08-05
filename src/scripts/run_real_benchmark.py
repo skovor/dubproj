@@ -1,6 +1,6 @@
 """Run a benchmark from a manifest JSON; no fake real-audio claim is inferred."""
 from __future__ import annotations
-import argparse, json
+import argparse, hashlib, json
 from pathlib import Path
 import sys
 import importlib
@@ -19,7 +19,8 @@ def main()->int:
         module_name, separator, function_name=args.runner.partition(":")
         if not separator: raise SystemExit("--runner must be module:function")
         runner=getattr(importlib.import_module(module_name), function_name)
-        payload=run_benchmark(manifest, runner, require_files=True).to_dict()
+        payload=run_benchmark(manifest, runner, require_files=True, require_trusted_runner=True).to_dict()
         payload={"schema":"benchmark-result-v2","status":"EXECUTED",**payload}
+    payload["evidence_sha256"] = hashlib.sha256(json.dumps({key: value for key, value in payload.items() if key != "evidence_sha256"}, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     Path(args.output).write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding="utf-8"); print(json.dumps(payload,indent=2)); return 0 if payload.get("status") == "EXECUTED" else 2
 if __name__=="__main__": raise SystemExit(main())
