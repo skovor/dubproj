@@ -43,7 +43,7 @@ _FINAL_ANCHOR_FEATURES = (
     "gap_to_active_speech_end_ms", "final_delete_count", "final_substitute_count",
     "insertions_inside_anchor", "final_interpolated",
 )
-_LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v1"
+_LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v2"
 _LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode")
 _PERFORMANCE_MODE_CODES = {
     "NEUTRAL": 0.0,
@@ -452,7 +452,7 @@ def predict_probability(calibrator: Mapping[str, Any], feature_vector: Mapping[s
     """Evaluate a safe Platt calibrator; never coerce missing data to a score."""
     if (
         calibrator.get("schema") != _CALIBRATOR_SCHEMA
-        or calibrator.get("feature_schema_version") not in {_FEATURE_SCHEMA_VERSION, "final-anchor-v1", "lid-fusion-v1"}
+        or calibrator.get("feature_schema_version") not in {_FEATURE_SCHEMA_VERSION, "final-anchor-v1", _LID_FEATURE_SCHEMA_VERSION}
         or calibrator.get("normalization_version") != _NORMALIZATION_VERSION
         or not list(calibrator.get("features") or ())
         or len(list(calibrator.get("features") or ())) != len(list(calibrator.get("coefficients") or ()))
@@ -812,16 +812,16 @@ def _final_anchor_is_calibrated(
     return decision.final_anchor_present is True
 
 
-def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, whisper_probability: float | None = None, whisper_source_probability: float | None = None, whisper_target_probability: float | None = None, ctc_target_probability: float | None = None, ctc_target_raw_score: float | None = None, ctc_target_calibrated_probability: float | None = None, performance_mode: str | None) -> dict[str, float] | None:
+def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, source_language: str = "en", target_language: str = "de", whisper_language: str | None = None, whisper_probability: float | None = None, whisper_source_probability: float | None = None, whisper_target_probability: float | None = None, ctc_target_probability: float | None = None, ctc_target_raw_score: float | None = None, ctc_target_calibrated_probability: float | None = None, performance_mode: str | None) -> dict[str, float] | None:
     if not isinstance(lid_evidence, Mapping):
         return None
     probabilities = lid_evidence.get("probabilities") if isinstance(lid_evidence.get("probabilities"), Mapping) else {}
     try:
         values = {
-            "lid_source_probability": float(lid_evidence.get("source_probability", probabilities.get("en", 0.0))),
-            "lid_target_probability": float(lid_evidence.get("target_probability", probabilities.get("de", 0.0))),
-            "whisper_source_probability": float(whisper_source_probability if whisper_source_probability is not None else (whisper_probability or 0.0)),
-            "whisper_target_probability": float(whisper_target_probability if whisper_target_probability is not None else 0.0),
+            "lid_source_probability": float(lid_evidence.get("source_probability", probabilities.get(_language_code(source_language), 0.0))),
+            "lid_target_probability": float(lid_evidence.get("target_probability", probabilities.get(_language_code(target_language), 0.0))),
+            "whisper_source_probability": float(whisper_source_probability if whisper_source_probability is not None else ((whisper_probability or 0.0) if _language_code(whisper_language) == _language_code(source_language) else 0.0)),
+            "whisper_target_probability": float(whisper_target_probability if whisper_target_probability is not None else ((whisper_probability or 0.0) if _language_code(whisper_language) == _language_code(target_language) else 0.0)),
             "ctc_target_raw_score": float(ctc_target_raw_score if ctc_target_raw_score is not None else (ctc_target_probability if ctc_target_probability is not None else 0.0)),
             "ctc_target_calibrated_probability": float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else 0.0),
             "duration_seconds": float(lid_evidence.get("duration_seconds", lid_evidence.get("duration", 0.0))),
@@ -969,7 +969,6 @@ def apply_independent_evidence(
         lid_calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("lid", {})).get("artifact_sha256", ""))
         feature_vector = _alignment_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
         final_anchor_feature_vector = _final_anchor_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
-        lid_feature_vector = _lid_feature_vector(lid_evidence, whisper_target_probability=base.language_probability, ctc_target_raw_score=raw_target_score, performance_mode=performance_mode)
         if feature_vector is None or final_anchor_feature_vector is None:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
@@ -1001,6 +1000,16 @@ def apply_independent_evidence(
         lid_feature_vector_hash = _feature_vector_hash(lid_feature_vector, _LID_FEATURE_SCHEMA_VERSION) if lid_feature_vector is not None else None
         calibrated_target_probability = _execute_platt_calibrator(calibrator, feature_vector)
         calibrated_final_anchor_probability = _execute_platt_calibrator(final_anchor_calibrator, final_anchor_feature_vector)
+        lid_feature_vector = _lid_feature_vector(
+            lid_evidence,
+            source_language=source_language,
+            target_language=target_language,
+            whisper_language=base.detected_language,
+            whisper_probability=base.language_probability,
+            ctc_target_raw_score=raw_target_score,
+            ctc_target_calibrated_probability=calibrated_target_probability,
+            performance_mode=performance_mode,
+        )
         calibrated_lid_probability = _execute_platt_calibrator(lid_calibrator, lid_feature_vector) if lid_feature_vector is not None else None
         if calibrated_target_probability is None or calibrated_final_anchor_probability is None or (lid_feature_vector is not None and calibrated_lid_probability is None):
             return LinguisticDecision(

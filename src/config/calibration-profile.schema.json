@@ -70,7 +70,7 @@
     },
     "targetCalibrator": {"allOf": [{"$ref": "#/$defs/baseCalibrator"}], "properties": {"feature_schema_version": {"const": "char-alignment-v2"}}},
     "finalAnchorCalibrator": {"allOf": [{"$ref": "#/$defs/baseCalibrator"}], "properties": {"feature_schema_version": {"const": "final-anchor-v1"}}},
-    "lidCalibrator": {"allOf": [{"$ref": "#/$defs/baseCalibrator"}], "properties": {"feature_schema_version": {"const": "lid-fusion-v1"}}}
+    "lidCalibrator": {"allOf": [{"$ref": "#/$defs/baseCalibrator"}], "properties": {"feature_schema_version": {"const": "lid-fusion-v2"}}}
   },
   "additionalProperties": true
 }

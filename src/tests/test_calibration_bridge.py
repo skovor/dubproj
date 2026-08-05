@@ -24,7 +24,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(len(Path(result["paths_by_split"]["target"]["calibration"]).read_text(encoding="utf-8").splitlines()), 1)
             self.assertEqual(Path(result["paths_by_split"]["target"]["hidden_test"]).read_text(encoding="utf-8"), "")
             self.assertEqual(result["schema"], "goldset-feature-bridge-v2")
-            self.assertEqual(json.loads(Path(result["paths"]["lid"]).read_text(encoding="utf-8"))["feature_schema_version"], "lid-fusion-v1")
+            self.assertEqual(json.loads(Path(result["paths"]["lid"]).read_text(encoding="utf-8"))["feature_schema_version"], "lid-fusion-v2")
             store.close()
 
     def test_bridge_rejects_missing_evidence(self):

@@ -20,7 +20,7 @@ class CalibrationTests(unittest.TestCase):
         values = {name: (0.9 if name.endswith("probability") else 0.5) for name in LID_FEATURES}
         rows = [LIDFeatureRow("a", "calibration", "g-a", 1, values), LIDFeatureRow("b", "calibration", "g-b", 0, values)]
         artifact = train_calibrator(rows, kind="lid", features=LID_FEATURES, dataset_sha256="x")
-        self.assertEqual(artifact.feature_schema_version, "lid-fusion-v1")
+        self.assertEqual(artifact.feature_schema_version, "lid-fusion-v2")
         with self.assertRaises(ValueError):
             LIDFeatureRow("c", "calibration", "g-c", 1, {"lid_source_probability": 0.9})
     def test_feature_extraction_rejects_missing_evidence(self):

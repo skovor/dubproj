@@ -57,15 +57,16 @@ def fuse_language_evidence(*, whisper_language: str | None, whisper_probability:
     lid_source = lid.language == policy.source_language and float(lid.probabilities.get(policy.source_language, 0.0)) >= policy.minimum_confidence
     lid_target = lid.language == policy.target_language and float(lid.probabilities.get(policy.target_language, 0.0)) >= policy.minimum_confidence
     raw_ctc = float(ctc_target_raw_score) if ctc_target_raw_score is not None and math.isfinite(float(ctc_target_raw_score)) else None
-    # The legacy parameter is retained as a compatibility alias for a
-    # calibrated probability.  New callers must name raw and calibrated CTC
-    # values explicitly so a raw score can never masquerade as a probability.
-    ctc = float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else ctc_target_probability) if (ctc_target_calibrated_probability is not None or ctc_target_probability is not None) and math.isfinite(float(ctc_target_calibrated_probability if ctc_target_calibrated_probability is not None else ctc_target_probability)) else None
+    legacy_ctc = float(ctc_target_probability) if ctc_target_probability is not None and math.isfinite(float(ctc_target_probability)) else None
+    # ``ctc_target_probability`` is a legacy name and is diagnostic-only.  A
+    # hard fusion branch may consume only a probability produced by the
+    # versioned CTC calibrator.
+    ctc = float(ctc_target_calibrated_probability) if ctc_target_calibrated_probability is not None and math.isfinite(float(ctc_target_calibrated_probability)) else None
     if whisper_source and lid_source and ctc is not None and ctc < .45: status = "LANGUAGE_LEAK_CONFIRMED"
     elif lid_source and ctc is not None and ctc >= .80: status = "EVIDENCE_CONFLICT"
     elif lid.status == "LID_UNCERTAIN" or (not lid_source and not lid_target): status = "LID_UNCERTAIN"
     else: status = "NO_LANGUAGE_LEAK_EVIDENCE"
-    return {"status": status, "whisper_source": whisper_source, "lid_source": lid_source, "lid_target": lid_target, "ctc_target_raw_score": raw_ctc, "ctc_target_calibrated_probability": ctc, "evidence_families": ["WHISPER_ASR", "AUDIO_LANGUAGE_ID"], "evidence_hashes": [lid.evidence_hash], "reason": lid.reason}
+    return {"status": status, "whisper_source": whisper_source, "lid_source": lid_source, "lid_target": lid_target, "ctc_target_raw_score": raw_ctc, "ctc_target_calibrated_probability": ctc, "legacy_ctc_target_probability": legacy_ctc, "ctc_calibration_status": "CALIBRATED" if ctc is not None else "UNAVAILABLE", "evidence_families": ["WHISPER_ASR", "AUDIO_LANGUAGE_ID"], "evidence_hashes": [lid.evidence_hash], "reason": lid.reason}
 
 
 def _evidence(status, language, probabilities, backend_id, model_id, revision, digest, duration, sample_rate, speech_ratio, reason):

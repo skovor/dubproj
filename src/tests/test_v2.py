@@ -56,7 +56,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
     }), encoding="utf-8")
     lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "whisper_target_probability", "ctc_target_raw_score", "ctc_target_calibrated_probability", "duration_seconds", "speech_ratio", "performance_mode"]
     lid_artifact.write_text(json.dumps({
-        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v2",
+        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v2", "normalization_version": "alignment-text-normalization-v2",
         "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0], "intercept": 0.0,
         "normalization": [{"mean": 0.0, "scale": 1.0} for _ in lid_features],
     }), encoding="utf-8")
@@ -85,7 +85,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
         "calibrators": {
         "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v2", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
         "final_anchor": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v2", "feature_names": final_features, "artifact_path": str(final_artifact), "artifact_sha256": sha256_file(final_artifact)},
-        "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v2", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
+        "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v2", "normalization_version": "alignment-text-normalization-v2", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
         },
         "dataset": {
             "manifest_sha256": "a" * 64,
