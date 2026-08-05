@@ -23,5 +23,9 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(artifact.feature_schema_version, "lid-fusion-v1")
         with self.assertRaises(ValueError):
             LIDFeatureRow("c", "calibration", "g-c", 1, {"lid_source_probability": 0.9})
+    def test_feature_extraction_rejects_missing_evidence(self):
+        from dubbing_pipeline.calibration.features import target_features
+        with self.assertRaises(ValueError):
+            target_features({"expected_characters": 4, "expected_words": 1, "duration": 1.0})
 
 if __name__ == "__main__": unittest.main()

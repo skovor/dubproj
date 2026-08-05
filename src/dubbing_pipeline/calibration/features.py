@@ -41,24 +41,39 @@ def _float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError): return default
 
 
+def _required(value: Mapping[str, Any], *names: str) -> float:
+    for name in names:
+        if name in value and value[name] not in (None, ""):
+            try:
+                result = float(value[name])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"calibration feature {name} is not numeric") from exc
+            if not __import__("math").isfinite(result):
+                raise ValueError(f"calibration feature {name} is non-finite")
+            return result
+    raise ValueError(f"missing calibration evidence field; expected one of {names}")
+
+
 def target_features(evidence: Mapping[str, Any], *, performance_mode: str = "NEUTRAL") -> dict[str, float]:
     """Read exactly the frozen target fields; missing values are a hard error."""
-    char_count = max(1.0, _float(evidence.get("expected_characters"), 1.0))
-    word_count = max(1.0, _float(evidence.get("expected_words"), 1.0))
-    duration = max(1e-6, _float(evidence.get("duration"), 0.0))
+    char_count = _required(evidence, "expected_characters")
+    word_count = _required(evidence, "expected_words")
+    duration = _required(evidence, "duration")
+    if char_count <= 0 or word_count <= 0 or duration <= 0:
+        raise ValueError("expected character/word counts and duration must be positive")
     values = {
-        "target_score": _float(evidence.get("raw_target_score", evidence.get("target_score"))),
-        "native_char_coverage": _float(evidence.get("native_char_coverage")),
-        "mean_char_score": _float(evidence.get("mean_char_score")),
-        "minimum_char_score": _float(evidence.get("minimum_char_score")),
-        "p10_char_score": _float(evidence.get("p10_char_score")),
-        "delete_ratio": _float(evidence.get("delete_ratio", _float(evidence.get("delete_count")) / char_count)),
-        "substitute_ratio": _float(evidence.get("substitute_ratio", _float(evidence.get("substitute_count")) / char_count)),
-        "insert_ratio": _float(evidence.get("insert_ratio", _float(evidence.get("insert_count")) / char_count)),
-        "interpolated_ratio": _float(evidence.get("interpolated_ratio", _float(evidence.get("interpolated_count")) / char_count)),
-        "compression_ratio": _float(evidence.get("compression_ratio")),
-        "characters_per_second": _float(evidence.get("characters_per_second", char_count / duration)),
-        "words_per_second": _float(evidence.get("words_per_second", word_count / duration)),
+        "target_score": _required(evidence, "raw_target_score", "target_score"),
+        "native_char_coverage": _required(evidence, "native_char_coverage"),
+        "mean_char_score": _required(evidence, "mean_char_score"),
+        "minimum_char_score": _required(evidence, "minimum_char_score"),
+        "p10_char_score": _required(evidence, "p10_char_score"),
+        "delete_ratio": _required(evidence, "delete_ratio") if "delete_ratio" in evidence else _required(evidence, "delete_count") / char_count,
+        "substitute_ratio": _required(evidence, "substitute_ratio") if "substitute_ratio" in evidence else _required(evidence, "substitute_count") / char_count,
+        "insert_ratio": _required(evidence, "insert_ratio") if "insert_ratio" in evidence else _required(evidence, "insert_count") / char_count,
+        "interpolated_ratio": _required(evidence, "interpolated_ratio") if "interpolated_ratio" in evidence else _required(evidence, "interpolated_count") / char_count,
+        "compression_ratio": _required(evidence, "compression_ratio"),
+        "characters_per_second": _required(evidence, "characters_per_second") if "characters_per_second" in evidence else char_count / duration,
+        "words_per_second": _required(evidence, "words_per_second") if "words_per_second" in evidence else word_count / duration,
         "duration": duration,
         "performance_mode": _performance_code(performance_mode),
     }
@@ -68,16 +83,18 @@ def target_features(evidence: Mapping[str, Any], *, performance_mode: str = "NEU
 
 def final_anchor_features(evidence: Mapping[str, Any]) -> dict[str, float]:
     anchor = evidence.get("final_anchor_evidence") if isinstance(evidence.get("final_anchor_evidence"), Mapping) else evidence
+    if not anchor:
+        raise ValueError("final-anchor evidence is missing")
     values = {
-        "final_coverage": _float(anchor.get("coverage", anchor.get("final_coverage"))),
-        "final_minimum_score": _float(anchor.get("minimum_score", anchor.get("final_minimum_score"))),
-        "final_mean_score": _float(anchor.get("mean_score", anchor.get("final_mean_score"))),
-        "final_duration": _float(anchor.get("duration_ms", anchor.get("final_duration"))) / (1000.0 if "duration_ms" in anchor else 1.0),
-        "gap_to_active_speech_end_ms": _float(anchor.get("gap_to_active_speech_end_ms")),
-        "final_delete_count": _float(anchor.get("deleted_characters", anchor.get("delete_count"))),
-        "final_substitute_count": _float(anchor.get("substituted_characters", anchor.get("substitute_count"))),
-        "insertions_inside_anchor": _float(anchor.get("insertions_inside_anchor", anchor.get("insert_count"))),
-        "final_interpolated": 1.0 if bool(anchor.get("interpolated", False)) else 0.0,
+        "final_coverage": _required(anchor, "coverage", "final_coverage"),
+        "final_minimum_score": _required(anchor, "minimum_score", "final_minimum_score"),
+        "final_mean_score": _required(anchor, "mean_score", "final_mean_score"),
+        "final_duration": _required(anchor, "duration_ms") / 1000.0 if "duration_ms" in anchor else _required(anchor, "final_duration"),
+        "gap_to_active_speech_end_ms": _required(anchor, "gap_to_active_speech_end_ms"),
+        "final_delete_count": _required(anchor, "deleted_characters", "delete_count"),
+        "final_substitute_count": _required(anchor, "substituted_characters", "substitute_count"),
+        "insertions_inside_anchor": _required(anchor, "insertions_inside_anchor", "insert_count"),
+        "final_interpolated": 1.0 if "interpolated" in anchor and bool(anchor["interpolated"]) else (_required(anchor, "final_interpolated") if "final_interpolated" in anchor else 0.0),
     }
     _finite(values); return values
 
