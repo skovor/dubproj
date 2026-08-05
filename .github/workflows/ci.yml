@@ -30,7 +30,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade "pip==25.0.1"
-          python -m pip install --constraint constraints-ci.txt -e ".[audio,dev]"
+          python -m pip install --constraint constraints-ci.txt -e ".[audio,dev,attestation]"
       - name: Verify dependency graph
         run: python -m pip check
       - name: Full pytest discovery
@@ -84,7 +84,7 @@ jobs:
       - name: Install core smoke dependencies
         run: |
           python -m pip install --upgrade "pip==25.0.1"
-          python -m pip install --constraint constraints-ci.txt -e ".[audio,dev]"
+          python -m pip install --constraint constraints-ci.txt -e ".[audio,dev,attestation]"
       - name: Verify dependency graph
         run: python -m pip check
       - name: Compile and run smoke checks
