@@ -36,6 +36,9 @@ from .performance import PerformanceEvidence, classify_performance
 from .performance_policy import policy_for
 from .model_pool import ModelIdentity, ModelPool
 from .state import StateStore
+from .attempts import AttemptStore
+from .repair import FailureCause, apply_repair
+from .repair_planner import plan_repairs
 
 
 def _line_window(line: Line, sample_rate: int, scene_id: str, channel: int) -> DeliveryWindow:
@@ -313,7 +316,7 @@ def _aggregate_line_scene_audit(rows: list[dict[str, Any]]) -> StageAudit:
     return StageAudit(stage="SCENE_QA", passed=passed, qa_hash=qa_hash, diagnostics={"topology": "LINE_SEPARATED", "line_count": len(rows)})
 
 
-def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None) -> dict[str, Any]:
+def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr: Any = None, stem_path: str | Path | None = None, output_dir: str | Path | None = None, language_profile: LanguageProfile | None = None, alignment_backend: Any = None, lid_backend: Any = None, model_pool: ModelPool | None = None, state_store: StateStore | None = None, repair_executor: Any = None) -> dict[str, Any]:
     """Run one scene and select only candidates that survive delivery QA.
 
     Raw QA is deliberately a filter, not the final decision.  Every surviving
@@ -352,6 +355,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             pool.get(ModelIdentity(role, str(getattr(backend, "model_id", "unknown")), str(getattr(backend, "model_revision", "unknown")), str(getattr(config, "device", "cpu")), str(getattr(config, "dtype", "float32"))), lambda backend=backend: backend)
     run_state = state_store or StateStore(out / "state", f"{scene.id}-{contract_hash('run', {'scene': scene.id, 'config': config.to_dict()})[:16]}")
     run_state.commit(RunState(scene.id, "PREFLIGHT"), {"event": "scene_started", "scene_id": scene.id})
+    repair_store = AttemptStore(out / "repair_attempts.sqlite")
     profile = _profile(config, language_profile)
     refs: dict[str, Any] = {}
     lines = [line for line in scene.lines if classify_line(line, append_ellipsis_experiment=config.append_ellipsis_experiment).policy not in {KEEP_ORIGINAL, BLOCKED}]
@@ -433,9 +437,33 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         "performance_by_line": {line_id: evidence.to_dict() for line_id, evidence in performance_by_line.items()},
         "qa_routes": {},
         "model_pool": {},
+        "repair_attempts": [],
     }
     stage_counts = {name: 0 for name in ("RAW_TECHNICAL_QA", "PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "LINGUISTIC_ALIGNMENT", "SCENE_QA")}
     alignment_count = 0
+
+    def _record_repair(line: Line, option: dict[str, Any]) -> None:
+        """Record one bounded causal action for a rejected candidate."""
+        audit = option.get("mounted_audit") or option.get("processed_audit") or option.get("raw_audit")
+        decision = ((audit.diagnostics if audit is not None else {}).get("linguistic_decision") or {})
+        status = str(decision.get("status") or option.get("alignment_status") or "")
+        if status in {"ASR_UNCERTAIN", "ALIGNMENT_UNCERTAIN", "ASR_EVIDENCE_MISSING"}:
+            cause = FailureCause.ASR_UNCERTAIN
+        elif status in {"LANGUAGE_LEAK_SUSPECTED", "LANGUAGE_LEAK_STRONG_SUSPICION", "EVIDENCE_CONFLICT"}:
+            cause = FailureCause.LANGUAGE_LEAK_CONFIRMED
+        elif not bool(decision.get("final_anchor_present", True)):
+            cause = FailureCause.FINAL_ANCHOR_MISSING
+        else:
+            cause = FailureCause.DETERMINISTIC_CALIBRATION if status == "BLOCKED" else FailureCause.SEAM_FAIL
+        action = plan_repairs(cause, decision)
+        if not action:
+            return
+        source_path = option.get("mounted_path") or option.get("processed_path") or getattr(option.get("candidate"), "raw_audio", None)
+        if not source_path or not Path(source_path).is_file():
+            return
+        reference_hash = refs.get(line.id).audio_sha256 if refs.get(line.id) is not None else None
+        outcome = apply_repair(action[0], line_id=line.id, input_audio_sha256=sha256_file(source_path), reference_sha256=reference_hash, store=repair_store, executor=repair_executor)
+        report["repair_attempts"].append({"line_id": line.id, "candidate_id": getattr(option.get("candidate"), "candidate_id", None), "cause": cause.value, "action": action[0].strategy, "outcome": outcome.status, "attempt_id": outcome.attempt_id, "diagnostics": outcome.diagnostics})
     stage_counts["RAW_TECHNICAL_QA"] = sum(len(value) for value in cohort.evaluations.values())
     report["stage_evidence"]["RAW_TECHNICAL_QA"] = {"status": "EXECUTED", "artifact_count": stage_counts["RAW_TECHNICAL_QA"]}
 
@@ -815,6 +843,14 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         _line_linguistic_summary(row, options, expected_text=line.effective_target_text, source_text=line.source_text, target_language=config.target_language)
         row["candidate_stages"] = [_stage_bundle(option) for option in options]
 
+    # Repairs are evidence records, not hidden retries.  A caller may provide
+    # a concrete technical executor; without one the outcome remains an
+    # explicit BLOCKED_NO_EXECUTOR/HOLD_NO_TTS record.
+    for line in scene.lines:
+        for option in options_by_line.get(line.id, []):
+            if not option.get("eligible"):
+                _record_repair(line, option)
+
     report["stage_evidence"]["LINGUISTIC_ALIGNMENT"] = {
         "status": "EXECUTED" if alignment_count else "NOT_RUN",
         "artifact_count": alignment_count,
@@ -892,6 +928,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     run_state.commit(RunState(scene.id, "FINAL", {line_id: str(row.get("status", "UNKNOWN")) for line_id, row in row_by_id.items()}, list(report["blockers"]), cursor=scene.id), {"event": "scene_finished", "scene_id": scene.id, "passed": report["pass"]})
     report["contract_hash"] = contract_hash("scene-v2", {"scene": scene.to_dict(), "config": config.to_dict(), "scene_qa": report["scene_qa"]})
     atomic_json(out / "FINAL_REPORT_V2.json", report)
+    repair_store.close()
     if owned_pool:
         pool.close()
     return report

@@ -898,6 +898,7 @@ class V2SchedulerTests(unittest.TestCase):
             decisions = report["lines"][0]["candidate_linguistic_decisions"]
             self.assertEqual({item["status"] for item in decisions}, {"ASR_UNCERTAIN", "PASS_CONFIRMED"})
             self.assertEqual(report["lines"][0]["line_linguistic_summary"]["eligible_count"], 1)
+            self.assertTrue(any(item["outcome"] == "HOLD_NO_TTS" for item in report["repair_attempts"]))
 
 
 if __name__ == "__main__":
