@@ -51,4 +51,19 @@ class GoldsetTests(unittest.TestCase):
         c1 = clip("c1", "l1", "calibration"); c2 = clip("c2", "l1", "validation")
         result = validate_goldset([c1, c2], []); self.assertTrue(any("line crosses" in e for e in result["errors"]))
 
+    def test_hidden_membership_requires_one_time_seal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = GoldsetStore(Path(tmp) / "gold.sqlite")
+            hidden = clip("hidden", "hidden-line", "hidden_test")
+            try:
+                store.add_clip(hidden)
+                self.assertFalse(validate_goldset(store.clips(), [], require_double_review=False)["hidden_test_sealed"])
+                seal = store.seal_hidden_test("lead")
+                self.assertTrue(seal["seal_id"])
+                self.assertTrue(validate_goldset(store.clips(), [], require_double_review=False, hidden_sealed=True)["hidden_test_sealed"])
+                store.mark_hidden_opened("lead")
+                with self.assertRaises(ValueError): store.mark_hidden_opened("lead")
+            finally:
+                store.close()
+
 if __name__ == "__main__": unittest.main()

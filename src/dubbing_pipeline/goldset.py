@@ -143,6 +143,10 @@ class GoldsetStore:
                 consensus_labels TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL, FOREIGN KEY (clip_id) REFERENCES clips(clip_id)
             );
+            CREATE TABLE IF NOT EXISTS hidden_seal (
+                seal_id TEXT PRIMARY KEY, operator_id TEXT NOT NULL, digest TEXT NOT NULL,
+                created_at TEXT NOT NULL, opened_at TEXT
+            );
         """)
         self._migrate_claims()
         self._db.commit()
@@ -222,6 +226,37 @@ class GoldsetStore:
         self._db.execute("INSERT OR REPLACE INTO adjudications VALUES (?, ?, ?, ?, ?)", (clip_id, adjudicator_id, canonical_json(list(selected)), comment, datetime.now(timezone.utc).isoformat()))
         self._db.commit()
 
+    def seal_hidden_test(self, operator_id: str) -> dict[str, Any]:
+        """Seal hidden membership once; the seal is content-addressed."""
+        from datetime import datetime, timezone
+        operator_id = _text(operator_id)
+        if not operator_id:
+            raise ValueError("operator_id is required")
+        if self._db.execute("SELECT 1 FROM hidden_seal LIMIT 1").fetchone() is not None:
+            raise ValueError("hidden test is already sealed")
+        rows = [{"clip_id": row["clip_id"], "payload": json.loads(row["payload"]), "audio_sha256": row["audio_sha256"]} for row in self._db.execute("SELECT clip_id, payload, audio_sha256 FROM clips WHERE split='hidden_test' ORDER BY clip_id")]
+        if not rows:
+            raise ValueError("cannot seal an empty hidden test")
+        digest = sha256_bytes(canonical_json(rows))
+        created_at = datetime.now(timezone.utc).isoformat()
+        self._db.execute("INSERT INTO hidden_seal VALUES (?, ?, ?, ?, NULL)", (f"hidden-{digest[:16]}", operator_id, digest, created_at)); self._db.commit()
+        return self.hidden_seal() or {}
+
+    def hidden_seal(self) -> dict[str, Any] | None:
+        row = self._db.execute("SELECT seal_id, operator_id, digest, created_at, opened_at FROM hidden_seal LIMIT 1").fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_hidden_opened(self, operator_id: str) -> dict[str, Any]:
+        """Record the one-shot hidden-set access used for final evaluation."""
+        seal = self.hidden_seal()
+        if seal is None:
+            raise ValueError("hidden test is not sealed")
+        if seal.get("opened_at"):
+            raise ValueError("hidden test has already been opened")
+        from datetime import datetime, timezone
+        self._db.execute("UPDATE hidden_seal SET opened_at=? WHERE seal_id=?", (datetime.now(timezone.utc).isoformat(), seal["seal_id"])); self._db.commit()
+        return self.hidden_seal() or {}
+
     def clips(self) -> list[ClipRecord]:
         return [ClipRecord(**json.loads(row["payload"])) for row in self._db.execute("SELECT payload FROM clips ORDER BY clip_id")]
 
@@ -234,9 +269,15 @@ class GoldsetStore:
             result.append(HumanLabel(**value))
         return result
 
-    def export(self, directory: str | Path) -> dict[str, str]:
+    def export(self, directory: str | Path, *, include_hidden: bool = False) -> dict[str, str]:
         root = Path(directory); root.mkdir(parents=True, exist_ok=True)
         clips = self.clips(); labels = self.labels()
+        hidden = [clip for clip in clips if clip.split == "hidden_test"]
+        seal = self.hidden_seal()
+        if hidden and seal is None:
+            raise ValueError("hidden test must be sealed before export")
+        if not include_hidden:
+            labels = [label for label in labels if next((clip.split for clip in clips if clip.clip_id == label.clip_id), "") != "hidden_test"]
         paths = {"manifest": root / "manifest.jsonl", "labels": root / "labels.jsonl", "splits": root / "splits.json", "reviewers": root / "reviewers.json", "disagreements": root / "disagreements.jsonl"}
         paths["manifest"].write_text("".join(canonical_json(c.to_dict()) + "\n" for c in clips), encoding="utf-8")
         paths["labels"].write_text("".join(canonical_json(l.to_dict()) + "\n" for l in labels), encoding="utf-8")
@@ -250,10 +291,12 @@ class GoldsetStore:
             if len({tuple(row.labels) for row in rows}) > 1 and not any(row.adjudicated_by for row in rows):
                 disagreements.append({"clip_id": clip_id, "reviewers": [row.reviewer_id for row in rows], "labels": [list(row.labels) for row in rows]})
         paths["disagreements"].write_text("".join(canonical_json(row) + "\n" for row in disagreements), encoding="utf-8")
+        if seal:
+            seal_path = root / "hidden_seal.json"; atomic_json(seal_path, {**seal, "labels_exported": bool(include_hidden)}); paths["hidden_seal"] = seal_path
         return {key: str(value) for key, value in paths.items()}
 
 
-def validate_goldset(clips: Iterable[ClipRecord], labels: Iterable[HumanLabel], *, require_double_review: bool = True) -> dict[str, Any]:
+def validate_goldset(clips: Iterable[ClipRecord], labels: Iterable[HumanLabel], *, require_double_review: bool = True, hidden_sealed: bool = False) -> dict[str, Any]:
     clips = list(clips); labels = list(labels)
     errors: list[str] = []; ids = [c.clip_id for c in clips]
     if len(ids) != len(set(ids)): errors.append("duplicate clip_id")
@@ -274,7 +317,9 @@ def validate_goldset(clips: Iterable[ClipRecord], labels: Iterable[HumanLabel], 
     for clip_id, rows in labels_by_clip.items():
         if len({tuple(row.labels) for row in rows}) > 1 and not any(row.adjudicated_by for row in rows): errors.append(f"unadjudicated disagreement: {clip_id}")
     counts = {split: sum(1 for clip in clips if clip.split == split) for split in SPLITS}
-    return {"valid": not errors, "errors": errors, "clip_count": len(clips), "label_count": len(labels), "split_counts": counts, "hidden_test_sealed": counts["hidden_test"] > 0}
+    if counts["hidden_test"] and not hidden_sealed:
+        errors.append("hidden test membership is not sealed")
+    return {"valid": not errors, "errors": errors, "clip_count": len(clips), "label_count": len(labels), "split_counts": counts, "hidden_test_sealed": bool(counts["hidden_test"] and hidden_sealed)}
 
 
 def manifest_hash(path: str | Path) -> str:
