@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("validation_report")
     parser.add_argument("hidden_report")
     parser.add_argument("--final-artifact", required=True)
+    parser.add_argument("--lid-artifact", required=True)
     parser.add_argument("--features", required=True, help="sealed FeatureRow JSONL; validation and hidden rows are recomputed")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--labels", required=True)
@@ -59,8 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-lock", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    target_path, final_path = Path(args.target_artifact), Path(args.final_artifact)
-    target = load_draft(target_path); final = load_draft(final_path)
+    target_path, final_path, lid_path = Path(args.target_artifact), Path(args.final_artifact), Path(args.lid_artifact)
+    target = load_draft(target_path); final = load_draft(final_path); lid = load_draft(lid_path)
     feature_rows = _rows(Path(args.features)); validation_rows = [row for row in feature_rows if row.split == "validation"]; hidden_rows = [row for row in feature_rows if row.split == "hidden_test"]
     validation = _report(Path(args.validation_report)); hidden = _report(Path(args.hidden_report))
     models_path, runtime_path = Path(args.models_lock), Path(args.runtime_lock)
@@ -71,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     identity = {"backend_id": backend_id, "model_id": str(model.get("model_id", "")), "model_revision": str(model.get("revision", "")), "feature_schema_version": str(target.get("feature_schema_version", "")), "target_language": str(model.get("language", "de")), "source_language": "en", "performance_modes": sorted({row.performance_mode for row in feature_rows})}
     thresholds = {"target_pass_probability": .8, "target_failure_probability": .2, "final_anchor_pass_probability": .8, "source_lid_probability": .8}
     provenance = {"code_commit": _git_sha(), "runtime_lock_sha256": _sha(runtime_path), "models_lock_sha256": _sha(models_path)}
-    profile = promote_profile(profile_id=f"{identity['model_id']}-{uuid.uuid4().hex[:8]}", target_artifact={**target, "artifact_path": str(target_path), "artifact_sha256": _sha(target_path)}, final_anchor_artifact={**final, "artifact_path": str(final_path), "artifact_sha256": _sha(final_path)}, validation=validation, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, dataset_files={"manifest_sha256": args.manifest, "labels_sha256": args.labels, "split_manifest_sha256": args.splits}, identity=identity, thresholds=thresholds, provenance=provenance, output=args.output)
+    profile = promote_profile(profile_id=f"{identity['model_id']}-{uuid.uuid4().hex[:8]}", target_artifact={**target, "artifact_path": str(target_path), "artifact_sha256": _sha(target_path)}, final_anchor_artifact={**final, "artifact_path": str(final_path), "artifact_sha256": _sha(final_path)}, lid_artifact={**lid, "artifact_path": str(lid_path), "artifact_sha256": _sha(lid_path)}, validation=validation, hidden=hidden, validation_rows=validation_rows, hidden_rows=hidden_rows, dataset_files={"manifest_sha256": args.manifest, "labels_sha256": args.labels, "split_manifest_sha256": args.splits}, identity=identity, thresholds=thresholds, provenance=provenance, output=args.output)
     print(json.dumps(profile, ensure_ascii=False, indent=2))
     return 0
 

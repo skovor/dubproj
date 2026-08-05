@@ -42,6 +42,8 @@ _FINAL_ANCHOR_FEATURES = (
     "gap_to_active_speech_end_ms", "final_delete_count", "final_substitute_count",
     "insertions_inside_anchor", "final_interpolated",
 )
+_LID_FEATURE_SCHEMA_VERSION = "lid-fusion-v1"
+_LID_FEATURES = ("lid_source_probability", "lid_target_probability", "whisper_source_probability", "ctc_target_probability", "duration_seconds", "speech_ratio", "performance_mode")
 _PERFORMANCE_MODE_CODES = {
     "NEUTRAL": 0.0,
     "FAST": 1.0,
@@ -168,6 +170,10 @@ class LinguisticDecision:
     calibrator_artifact_sha256: str | None = None
     final_anchor_calibrator_hash: str | None = None
     final_anchor_calibrator_artifact_sha256: str | None = None
+    calibrated_lid_probability: float | None = None
+    lid_feature_vector: dict[str, float] | None = None
+    lid_feature_vector_hash: str | None = None
+    lid_calibrator_hash: str | None = None
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -226,6 +232,10 @@ class LinguisticDecision:
             "calibrator_artifact_sha256": self.calibrator_artifact_sha256,
             "final_anchor_calibrator_hash": self.final_anchor_calibrator_hash,
             "final_anchor_calibrator_artifact_sha256": self.final_anchor_calibrator_artifact_sha256,
+            "calibrated_lid_probability": self.calibrated_lid_probability,
+            "lid_feature_vector": dict(self.lid_feature_vector) if self.lid_feature_vector is not None else None,
+            "lid_feature_vector_hash": self.lid_feature_vector_hash,
+            "lid_calibrator_hash": self.lid_calibrator_hash,
             "reason": self.reason,
         }
 
@@ -501,7 +511,7 @@ def _load_calibrator_artifact(
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     if str(calibrator.get("format", "")) != _CALIBRATOR_FORMAT:
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
-    expected_artifact_schema = "final-anchor-v1" if role == "final_anchor" else str(feature_schema_version)
+    expected_artifact_schema = "final-anchor-v1" if role == "final_anchor" else (_LID_FEATURE_SCHEMA_VERSION if role == "lid" else str(feature_schema_version))
     if str(calibrator.get("feature_schema_version", "")) != expected_artifact_schema or str(calibrator.get("normalization_version", "")) != _NORMALIZATION_VERSION:
         return None, None, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
     path = _resolve_calibrator_path(calibrator, profile, calibrator_root)
@@ -509,8 +519,8 @@ def _load_calibrator_artifact(
     if path is None or not path.is_file() or not _SHA256.fullmatch(expected_hash):
         return None, path, "BLOCKED_CALIBRATOR_ARTIFACT"
     try:
-        expected_features = _CALIBRATOR_FEATURES if role == "target" else _FINAL_ANCHOR_FEATURES
-        expected_artifact_schema = str(feature_schema_version) if role == "target" else "final-anchor-v1"
+        expected_features = _CALIBRATOR_FEATURES if role == "target" else (_FINAL_ANCHOR_FEATURES if role == "final_anchor" else _LID_FEATURES)
+        expected_artifact_schema = str(feature_schema_version) if role == "target" else ("final-anchor-v1" if role == "final_anchor" else _LID_FEATURE_SCHEMA_VERSION)
         payload = load_safe_calibrator(path, expected_hash, expected_artifact_schema, expected_features)
     except ValueError:
         return None, path, "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
@@ -659,7 +669,7 @@ def calibration_profile_status(
         return "BLOCKED_INCOMPLETE_PROFILE"
     if any(value < 0.0 or value > 1.0 for value in threshold_values.values()) or threshold_values["target_failure_probability"] >= threshold_values["target_pass_probability"]:
         return "BLOCKED_INVALID_THRESHOLDS"
-    for role in ("target", "final_anchor"):
+    for role in ("target", "final_anchor", "lid"):
         spec = calibrators.get(role) if isinstance(calibrators, Mapping) else None
         if not isinstance(spec, Mapping):
             return "BLOCKED_CALIBRATOR_SET"
@@ -673,7 +683,8 @@ def calibration_profile_status(
                 return "BLOCKED_CALIBRATOR_HASH"
         except OSError:
             return "BLOCKED_CALIBRATOR_ARTIFACT"
-        if not all(str(spec.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
+        expected_schema = "final-anchor-v1" if role == "final_anchor" else (_LID_FEATURE_SCHEMA_VERSION if role == "lid" else feature_schema_version)
+        if str(spec.get("feature_schema_version", "")) != expected_schema or not all(str(spec.get(key, "")).strip() for key in ("engine", "format", "feature_schema_version", "normalization_version")):
             return "BLOCKED_CALIBRATOR_NOT_EXECUTABLE"
         loaded, _loaded_path, executable_status = _load_calibrator_artifact(
             profile,
@@ -748,6 +759,25 @@ def _final_anchor_is_calibrated(
         except (TypeError, ValueError):
             return False
     return decision.final_anchor_present is True
+
+
+def _lid_feature_vector(lid_evidence: Mapping[str, Any] | None, *, whisper_probability: float | None, ctc_target_probability: float | None, performance_mode: str | None) -> dict[str, float] | None:
+    if not isinstance(lid_evidence, Mapping):
+        return None
+    probabilities = lid_evidence.get("probabilities") if isinstance(lid_evidence.get("probabilities"), Mapping) else {}
+    try:
+        values = {
+            "lid_source_probability": float(lid_evidence.get("source_probability", probabilities.get("en", 0.0))),
+            "lid_target_probability": float(lid_evidence.get("target_probability", probabilities.get("de", 0.0))),
+            "whisper_source_probability": float(whisper_probability or 0.0),
+            "ctc_target_probability": float(ctc_target_probability if ctc_target_probability is not None else 0.0),
+            "duration_seconds": float(lid_evidence.get("duration_seconds", lid_evidence.get("duration", 0.0))),
+            "speech_ratio": float(lid_evidence.get("speech_ratio", 0.0)),
+            "performance_mode": _PERFORMANCE_MODE_CODES.get(str(performance_mode or "NEUTRAL").upper(), 0.0),
+        }
+    except (TypeError, ValueError):
+        return None
+    return values if all(math.isfinite(value) for value in values.values()) else None
 
 
 def apply_independent_evidence(
@@ -832,8 +862,12 @@ def apply_independent_evidence(
     feature_vector_hash: str | None = None
     final_anchor_feature_vector: dict[str, float] | None = None
     final_anchor_feature_vector_hash: str | None = None
+    calibrated_lid_probability: float | None = None
+    lid_feature_vector: dict[str, float] | None = None
+    lid_feature_vector_hash: str | None = None
     calibrator_hash: str | None = None
     final_anchor_calibrator_hash: str | None = None
+    lid_calibrator_hash: str | None = None
     if calibrated:
         calibrator, _calibrator_path, execution_status = _load_calibrator_artifact(
             calibration_profile or {},
@@ -847,8 +881,12 @@ def apply_independent_evidence(
             calibrator_root=calibration_profile_root,
             feature_schema_version=feature_schema_version,
         )
-        execution_status = execution_status or final_anchor_status
-        if execution_status or calibrator is None or final_anchor_calibrator is None:
+        lid_calibrator, _lid_path, lid_status = _load_calibrator_artifact(
+            calibration_profile or {}, role="lid", calibrator_root=calibration_profile_root,
+            feature_schema_version=feature_schema_version,
+        )
+        execution_status = execution_status or final_anchor_status or lid_status
+        if execution_status or calibrator is None or final_anchor_calibrator is None or lid_calibrator is None:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
                    "source_alignment_score": source_score, "alignment_margin": margin,
@@ -871,8 +909,10 @@ def apply_independent_evidence(
             )
         calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("target", {})).get("artifact_sha256", ""))
         final_anchor_calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("final_anchor", {})).get("artifact_sha256", ""))
+        lid_calibrator_hash = str(((calibration_profile or {}).get("calibrators", {}).get("lid", {})).get("artifact_sha256", ""))
         feature_vector = _alignment_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
         final_anchor_feature_vector = _final_anchor_feature_vector(alignment_target, target_score=raw_target_score, performance_mode=performance_mode)
+        lid_feature_vector = _lid_feature_vector(lid_evidence, whisper_probability=base.language_probability, ctc_target_probability=raw_target_score, performance_mode=performance_mode)
         if feature_vector is None or final_anchor_feature_vector is None:
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
@@ -895,14 +935,17 @@ def apply_independent_evidence(
                    "calibrator_artifact_sha256": calibrator_hash,
                    "evidence_records": records, "evidence_families": families,
                    "calibration_authority": False,
+                   "lid_feature_vector": lid_feature_vector, "lid_calibrator_hash": lid_calibrator_hash,
                    "calibration_profile_status": "BLOCKED_CALIBRATION_FEATURES",
                    "reason": "calibrated alignment requires complete character-level features and final-anchor evidence"}
             )
         feature_vector_hash = _feature_vector_hash(feature_vector)
         final_anchor_feature_vector_hash = _feature_vector_hash(final_anchor_feature_vector, "final-anchor-v1")
+        lid_feature_vector_hash = _feature_vector_hash(lid_feature_vector, _LID_FEATURE_SCHEMA_VERSION) if lid_feature_vector is not None else None
         calibrated_target_probability = _execute_platt_calibrator(calibrator, feature_vector)
         calibrated_final_anchor_probability = _execute_platt_calibrator(final_anchor_calibrator, final_anchor_feature_vector)
-        if calibrated_target_probability is None or calibrated_final_anchor_probability is None:
+        calibrated_lid_probability = _execute_platt_calibrator(lid_calibrator, lid_feature_vector) if lid_feature_vector is not None else None
+        if calibrated_target_probability is None or calibrated_final_anchor_probability is None or (lid_feature_vector is not None and calibrated_lid_probability is None):
             return LinguisticDecision(
                 **{**base.__dict__, "status": "BLOCKED", "expected_alignment_score": raw_target_score,
                    "source_alignment_score": source_score, "alignment_margin": margin,
@@ -919,6 +962,10 @@ def apply_independent_evidence(
                    "calibrator_artifact_sha256": calibrator_hash,
                    "final_anchor_calibrator_hash": final_anchor_calibrator_hash,
                    "final_anchor_calibrator_artifact_sha256": final_anchor_calibrator_hash,
+                   "calibrated_lid_probability": calibrated_lid_probability,
+                   "lid_feature_vector": lid_feature_vector,
+                   "lid_feature_vector_hash": lid_feature_vector_hash,
+                   "lid_calibrator_hash": lid_calibrator_hash,
                    "evidence_records": records, "evidence_families": families,
                    "calibration_authority": False,
                    "calibration_profile_status": "BLOCKED_CALIBRATION_EXECUTION",
@@ -973,7 +1020,7 @@ def apply_independent_evidence(
         lid_evidence
         and lid_family == "AUDIO_LANGUAGE_ID"
         and lid_language == source_code
-        and lid_probability >= _validated_profile_threshold(calibration_profile if calibrated else None, "source_lid_probability", .70)
+        and (calibrated_lid_probability if calibrated else lid_probability) >= _validated_profile_threshold(calibration_profile if calibrated else None, "source_lid_probability", .70)
     )
     # The raw source score and target-source margin are diagnostic telemetry.
     # German and English CTC models are not calibrated onto one probability
@@ -1060,6 +1107,10 @@ def apply_independent_evidence(
            "calibrator_artifact_sha256": calibrator_hash,
            "final_anchor_calibrator_hash": final_anchor_calibrator_hash,
            "final_anchor_calibrator_artifact_sha256": final_anchor_calibrator_hash,
+           "calibrated_lid_probability": calibrated_lid_probability,
+           "lid_feature_vector": lid_feature_vector,
+           "lid_feature_vector_hash": lid_feature_vector_hash,
+           "lid_calibrator_hash": lid_calibrator_hash,
            "evidence_records": records, "evidence_families": families,
            "confirmed": status in {"PASS_CONFIRMED", "PASS_PHONETIC", "LANGUAGE_LEAK_CONFIRMED", "LEXICAL_FAILURE_CONFIRMED"},
            "calibration_authority": calibrated, "calibration_profile_status": profile_status,

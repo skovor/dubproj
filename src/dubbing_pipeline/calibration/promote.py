@@ -25,7 +25,7 @@ def _artifact_spec(value: Mapping[str, Any], role: str, identity: Mapping[str, A
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise PromotionError(f"{role} artifact is not valid JSON") from exc
-    expected_schema = "final-anchor-v1" if role == "final_anchor" else str(identity.get("feature_schema_version", "char-alignment-v2"))
+    expected_schema = "final-anchor-v1" if role == "final_anchor" else ("lid-fusion-v1" if role == "lid" else str(identity.get("feature_schema_version", "char-alignment-v2")))
     if payload.get("schema") != "platt-calibrator-v1" or payload.get("feature_schema_version") != expected_schema or payload.get("status", "DRAFT") not in {"DRAFT", "VALIDATED"}:
         raise PromotionError(f"{role} artifact schema/status mismatch")
     features = list(payload.get("features") or [])
@@ -43,7 +43,7 @@ def _require_class_composition(rows: list[Any], split: str, *, minimum: int = 2)
         raise PromotionError(f"{split} requires at least {minimum} positive and {minimum} negative sealed rows")
 
 
-def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | Mapping[str, Any], final_anchor_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, validation: ValidationReport, hidden: ValidationReport, dataset_files: Mapping[str, str | Path], identity: Mapping[str, Any], thresholds: Mapping[str, float], provenance: Mapping[str, Any], output: str | Path, validation_rows: Iterable[Any] | None = None, hidden_rows: Iterable[Any] | None = None, minimum_class_count: int = 2) -> dict[str, Any]:
+def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | Mapping[str, Any], final_anchor_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, lid_artifact: CalibrationArtifact | Mapping[str, Any] | None = None, validation: ValidationReport, hidden: ValidationReport, dataset_files: Mapping[str, str | Path], identity: Mapping[str, Any], thresholds: Mapping[str, float], provenance: Mapping[str, Any], output: str | Path, validation_rows: Iterable[Any] | None = None, hidden_rows: Iterable[Any] | None = None, minimum_class_count: int = 2) -> dict[str, Any]:
     """Create VALIDATED only from sealed rows and recomputed predictions.
 
     Precomputed JSON reports are treated as claims, not evidence.  Callers
@@ -74,14 +74,15 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
     if not all(str(provenance.get(key, "")).strip() for key in ("code_commit", "runtime_lock_sha256", "models_lock_sha256")): raise PromotionError("incomplete provenance")
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(provenance.get("code_commit", ""))): raise PromotionError("code_commit must be a real Git SHA")
     if any(not re.fullmatch(r"[0-9a-fA-F]{64}", str(provenance.get(key, ""))) for key in ("runtime_lock_sha256", "models_lock_sha256")): raise PromotionError("lock provenance hashes are invalid")
-    if final_anchor_artifact is None: raise PromotionError("target and final-anchor artifacts are both required")
+    if final_anchor_artifact is None or lid_artifact is None: raise PromotionError("target, final-anchor, and LID artifacts are all required")
     artifact = target_artifact.to_dict() if isinstance(target_artifact, CalibrationArtifact) else dict(target_artifact)
     anchor = final_anchor_artifact.to_dict() if isinstance(final_anchor_artifact, CalibrationArtifact) else dict(final_anchor_artifact)
-    target_spec, target_payload = _artifact_spec(artifact, "target", identity); anchor_spec, anchor_payload = _artifact_spec(anchor, "final_anchor", identity)
+    lid = lid_artifact.to_dict() if isinstance(lid_artifact, CalibrationArtifact) else dict(lid_artifact)
+    target_spec, target_payload = _artifact_spec(artifact, "target", identity); anchor_spec, anchor_payload = _artifact_spec(anchor, "final_anchor", identity); lid_spec, lid_payload = _artifact_spec(lid, "lid", identity)
     profile = {
         "schema": "generic-dubbing-alignment-calibration-profile-v2", "status": "VALIDATED", "authority": True, "profile_id": profile_id,
         "identity": dict(identity), "thresholds": {key: float(value) for key, value in thresholds.items()},
-        "calibrators": {"target": target_spec, "final_anchor": anchor_spec},
+        "calibrators": {"target": target_spec, "final_anchor": anchor_spec, "lid": lid_spec},
         "dataset": {**hashes, "calibration_count": int(artifact.get("sample_count", 0)), "validation_count": validation.count, "hidden_test_count": hidden.count},
         "metrics": {"hidden_false_pass_count": hidden.false_pass_count, "hidden_false_fail_count": hidden.false_fail_count, "brier_score": hidden.brier_score, "expected_calibration_error": hidden.expected_calibration_error, "validation": validation.to_dict(), "validation_predictions_sha256": _prediction_digest(validation), "hidden_predictions_sha256": _prediction_digest(hidden), "recomputed": True},
         "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id},

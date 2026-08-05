@@ -34,6 +34,7 @@ from dubbing_pipeline.reference import materialize_reference
 def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dict, Path, Path]:
     artifact = root / "target_calibrator.json"
     final_artifact = root / "final_anchor_calibrator.json"
+    lid_artifact = root / "lid_calibrator.json"
     runtime_lock = root / "runtime.lock"
     models_lock = root / "models.lock"
     target_features = ["target_score", "native_char_coverage", "mean_char_score", "minimum_char_score", "p10_char_score", "delete_ratio", "substitute_ratio", "insert_ratio", "interpolated_ratio", "compression_ratio", "characters_per_second", "words_per_second", "duration", "performance_mode"]
@@ -52,6 +53,12 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
     final_artifact.write_text(json.dumps({
         "schema": "platt-calibrator-v1", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v1",
         "features": final_features, "coefficients": [1.2, .8, .7, .7, -.01, -1.0, -1.0, -1.0, -1.0], "intercept": -1.1, "normalization": final_normalization,
+    }), encoding="utf-8")
+    lid_features = ["lid_source_probability", "lid_target_probability", "whisper_source_probability", "ctc_target_probability", "duration_seconds", "speech_ratio", "performance_mode"]
+    lid_artifact.write_text(json.dumps({
+        "schema": "platt-calibrator-v1", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v1",
+        "features": lid_features, "coefficients": [1.0, -1.0, 1.0, -1.0, 0.0, 0.0, 0.0], "intercept": 0.0,
+        "normalization": [{"mean": 0.0, "scale": 1.0} for _ in lid_features],
     }), encoding="utf-8")
     runtime_lock.write_bytes(b"runtime-lock-for-test")
     models_lock.write_bytes(b"models-lock-for-test")
@@ -78,6 +85,7 @@ def _validated_profile(root: Path, *, model_revision: str = "test") -> tuple[dic
         "calibrators": {
             "target": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "char-alignment-v2", "normalization_version": "alignment-text-normalization-v1", "feature_names": target_features, "artifact_path": str(artifact), "artifact_sha256": sha256_file(artifact)},
             "final_anchor": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "final-anchor-v1", "normalization_version": "alignment-text-normalization-v1", "feature_names": final_features, "artifact_path": str(final_artifact), "artifact_sha256": sha256_file(final_artifact)},
+            "lid": {"type": "platt", "engine": "builtin", "format": "json", "feature_schema_version": "lid-fusion-v1", "normalization_version": "alignment-text-normalization-v1", "feature_names": lid_features, "artifact_path": str(lid_artifact), "artifact_sha256": sha256_file(lid_artifact)},
         },
         "dataset": {
             "manifest_sha256": "a" * 64,
