@@ -12,6 +12,7 @@ from typing import Any
 
 from .audio import read
 from .alignment import AlignmentCache, AlignmentUnavailable, contrastive_align, language_id_evidence
+from .lid import LIDPolicy, independent_lid, fuse_language_evidence
 from .asr import ASRCache, DualASREvidence, prepare_whisperx_escalation, transcribe_dual
 from .contracts import DeliveryWindow, FailureClass
 from .contracts.manifest import validate_scene_value
@@ -266,6 +267,7 @@ def _stage_bundle(option: dict[str, Any]) -> dict[str, Any]:
         "serialized": option["serialized_audit"].to_dict() if option.get("serialized_audit") is not None else None,
         "alignment": option.get("alignment"),
         "lid": option.get("lid"),
+        "lid_fusion": option.get("lid_fusion"),
         "alignment_status": option.get("alignment_status"),
         "error": option.get("error"),
     }
@@ -649,8 +651,33 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 stage_counts["LINGUISTIC_ALIGNMENT"] += 1
                 alignment_dict = alignment.to_dict()
                 lid = None
-                if alignment.source_score is not None and alignment.source_score >= float(getattr(config.qa, "alignment_source_leak_score", .75)) and lid_backend is not None:
-                    lid = language_id_evidence(lid_backend, mounted_audit.artifact_path or "")
+                lid_fusion = None
+                source_suspected = alignment.source_score is not None and alignment.source_score >= float(getattr(config.qa, "alignment_source_leak_score", .75))
+                asr_snapshot = mounted_audit.diagnostics.get("asr") if mounted_audit is not None else None
+                automatic_snapshot = (asr_snapshot or {}).get("automatic") if isinstance(asr_snapshot, dict) else None
+                source_suspected = source_suspected or (isinstance(automatic_snapshot, dict) and str(automatic_snapshot.get("language", "")).casefold().startswith(str(config.source_language).casefold()))
+                if source_suspected and lid_backend is not None:
+                    import numpy as np
+                    lid_audio, lid_rate = read(mounted_audit.artifact_path or "", always_2d=True)
+                    speech_ratio = float(np.mean(np.abs(lid_audio[:, 0]) > 0.01)) if len(lid_audio) else 0.0
+                    lid_obj = independent_lid(
+                        lid_backend,
+                        mounted_audit.artifact_path or "",
+                        policy=LIDPolicy(source_language=config.source_language, target_language=config.target_language),
+                        duration_seconds=len(lid_audio) / max(1, int(lid_rate)),
+                        speech_ratio=speech_ratio,
+                        sample_rate=int(lid_rate),
+                        audio_sha256=sha256_file(mounted_audit.artifact_path or ""),
+                    )
+                    lid = lid_obj.to_dict()
+                    lid_fusion = fuse_language_evidence(
+                        whisper_language=(automatic_snapshot or {}).get("language") if isinstance(automatic_snapshot, dict) else None,
+                        whisper_probability=(automatic_snapshot or {}).get("probability") if isinstance(automatic_snapshot, dict) else None,
+                        lid=lid_obj,
+                        ctc_target_probability=alignment.target_score,
+                        policy=LIDPolicy(source_language=config.source_language, target_language=config.target_language),
+                    )
+                    lid["fusion"] = lid_fusion
                 mounted_audio, mounted_rate = read(mounted_audit.artifact_path or "", always_2d=True)
                 regraded = audit_candidate_stage(
                     mounted_audit.artifact_path or "",
@@ -678,6 +705,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 option["mounted_audit"] = regraded
                 option["alignment"] = alignment_dict
                 option["lid"] = lid
+                option["lid_fusion"] = lid_fusion
                 option["alignment_status"] = linguistic_status(regraded.result) or "ALIGNMENT_UNCERTAIN"
                 if scene.topology != "EMBEDDED_FMV" and option.get("serialized_audit") is not None:
                     # For a line-separated asset the serialized artifact is

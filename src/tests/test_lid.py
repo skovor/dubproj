@@ -13,7 +13,7 @@ class LIDTests(unittest.TestCase):
         self.assertEqual(evidence.status, "LID_NOT_APPLICABLE")
     def test_independent_backend_and_hash(self):
         with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=1, speech_ratio=.8, sample_rate=48000, audio_sha256="a"*64)
-        self.assertEqual(evidence.status, "LID_CONFIDENT"); self.assertEqual(evidence.backend_id, "speechbrain-ecapa"); self.assertEqual(len(evidence.evidence_hash), 64)
+        self.assertEqual(evidence.status, "LID_CONFIDENT"); self.assertEqual(evidence.backend_id, "speechbrain-ecapa"); self.assertEqual(len(evidence.evidence_hash), 64); self.assertEqual(evidence.record["evidence_family"], "AUDIO_LANGUAGE_ID")
     def test_concordance_confirms_leak(self):
         with tempfile.NamedTemporaryFile() as audio: evidence=independent_lid(Backend(), audio.name, policy=LIDPolicy(), duration_seconds=1, speech_ratio=.8, sample_rate=48000, audio_sha256="a"*64)
         result=fuse_language_evidence(whisper_language="en", whisper_probability=.9, lid=evidence, ctc_target_probability=.2, policy=LIDPolicy()); self.assertEqual(result["status"], "LANGUAGE_LEAK_CONFIRMED")

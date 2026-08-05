@@ -28,6 +28,7 @@ class LIDEvidence:
     speech_ratio: float
     evidence_hash: str
     reason: str = ""
+    record: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]: return dict(self.__dict__)
 
@@ -43,6 +44,8 @@ def independent_lid(backend: Any, audio_path: str | Path, *, policy: LIDPolicy, 
     probabilities = {str(key).casefold().split("-", 1)[0]: float(value) for key, value in (raw.get("probabilities") or raw.get("scores") or {}).items() if math.isfinite(float(value))}
     language = str(raw.get("language") or (max(probabilities, key=probabilities.get) if probabilities else "")).casefold().split("-", 1)[0] or None
     confidence = float(raw.get("probability", probabilities.get(language or "", 0.0)) or 0.0)
+    if language and language not in probabilities:
+        probabilities[language] = confidence
     status = "LID_CONFIDENT" if language and confidence >= policy.minimum_confidence else "LID_UNCERTAIN"
     return _evidence(status, language, probabilities, backend_id, model_id, revision, digest, duration_seconds, sample_rate, speech_ratio, "" if status == "LID_CONFIDENT" else "confidence_below_threshold")
 
@@ -63,6 +66,8 @@ def fuse_language_evidence(*, whisper_language: str | None, whisper_probability:
 
 def _evidence(status, language, probabilities, backend_id, model_id, revision, digest, duration, sample_rate, speech_ratio, reason):
     payload = {"status": status, "language": language, "probabilities": probabilities, "audio_sha256": digest, "backend_id": backend_id, "model_id": model_id, "model_revision": revision, "duration": duration, "sample_rate": sample_rate, "speech_ratio": speech_ratio, "reason": reason}
-    return LIDEvidence(status, language, probabilities, backend_id, model_id, revision, digest, duration, sample_rate, speech_ratio, sha256_bytes(canonical_json(payload)), reason)
+    evidence_hash = sha256_bytes(canonical_json(payload))
+    record = {"evidence_id": evidence_hash, "evidence_family": "AUDIO_LANGUAGE_ID", "backend_id": backend_id, "model_id": model_id, "model_revision": revision, "mode": "spoken_language_id", "audio_sha256": digest, "semantic_key": None, "output": {"status": status, "language": language, "probabilities": probabilities, "probability": probabilities.get(language or "", 0.0), "duration_seconds": duration, "speech_ratio": speech_ratio}, "confidence": probabilities.get(language or "", 0.0), "evidence_hash": evidence_hash}
+    return LIDEvidence(status, language, probabilities, backend_id, model_id, revision, digest, duration, sample_rate, speech_ratio, evidence_hash, reason, record)
 
 __all__ = ["LIDPolicy", "LIDEvidence", "independent_lid", "fuse_language_evidence"]
