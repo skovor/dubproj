@@ -921,6 +921,42 @@ class V2SchedulerTests(unittest.TestCase):
             self.assertEqual(report["lines"][0]["line_linguistic_summary"]["eligible_count"], 1)
             self.assertTrue(any(item["outcome"] == "HOLD_NO_TTS" for item in report["repair_attempts"]))
 
+    def test_repaired_candidate_reenters_full_pipeline_and_can_be_selected(self):
+        import soundfile as sf
+        class Backend:
+            def generate_batch(self, payload):
+                audio = np.zeros(2400, dtype="float32"); audio[100:1100] = .05
+                return [audio for _ in payload]
+        class ASR:
+            def transcribe(self, _path, *, language=None):
+                return {"text": "Hallo", "language": "de", "probability": .99}
+        class RepairCTC(self.FakeCTC):
+            def align(self, path, *, text, language):
+                value = super().align(path, text=text, language=language)
+                if "repair_candidates" in str(path):
+                    value["final_anchor_present"] = True
+                else:
+                    value["score"] = .1
+                    value["coverage"] = 0.0
+                    value["char_segments"] = []
+                    value["words"] = []
+                    value["final_anchor_present"] = False
+                return value
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); ref = root / "ref.wav"; repair_output = root / "repair.wav"
+            sf.write(ref, np.ones(2400, dtype="float32") * .04, 24000)
+            qa, runtime_lock, models_lock = self._calibrated_qa(root)
+            config = PipelineConfig(project_root=root, output_root=root / "out", cache_root=root / "cache", sample_rate=24000, native_sample_rate=24000, lab_mode=True, sandbox_root=root / "sandbox", initial_takes=1, retry_takes=0, qa=qa, runtime_lock=runtime_lock, models_lock=models_lock)
+            line = Line("L1", "A", "Hello", "Hallo", 0, 1, topology="LINE_SEPARATED", subtitle_authorized=True, reference_audio=str(ref))
+            def execute(_action):
+                sf.write(repair_output, np.ones(2400, dtype="float32") * .05, 24000)
+                return {"status": "PASS", "output_audio_path": str(repair_output)}
+            report = run_scene_v2(Scene("S", "LINE_SEPARATED", [line]), config, runtime=GenerationRuntimeV2(Backend(), backend_version="test"), asr=ASR(), alignment_backend=RepairCTC(), repair_executor=execute)
+            self.assertTrue(any(item.get("outcome") == "PASS" for item in report["repair_attempts"]), report["repair_attempts"])
+            self.assertTrue(any(item.get("repair_reinserted") for item in report["lines"][0]["candidate_stages"] if isinstance(item, dict)), report)
+            self.assertTrue(report["pass"], report)
+            self.assertTrue(str(report["lines"][0]["candidate_id"]).startswith("L1:repair:"))
+
 
 if __name__ == "__main__":
     unittest.main()

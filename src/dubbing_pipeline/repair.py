@@ -27,6 +27,32 @@ class RepairOutcome:
     output_audio_sha256: str | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
+
+@dataclass(frozen=True)
+class RepairedCandidate:
+    """An executor output that is eligible to re-enter normal QA stages."""
+
+    line_id: str
+    output_audio_path: str
+    output_audio_sha256: str
+    action: RepairAction
+    attempt_id: str
+
+
+def repaired_candidate(outcome: RepairOutcome, *, line_id: str) -> RepairedCandidate | None:
+    """Validate the executor artifact without granting it QA authority."""
+    path_value = outcome.diagnostics.get("output_audio_path")
+    if outcome.status not in {"PASS", "EXECUTOR_NO_STATUS"} or not path_value:
+        return None
+    path = Path(str(path_value))
+    if not path.is_file() or outcome.attempt_id is None or outcome.action is None:
+        return None
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    declared = outcome.diagnostics.get("output_audio_sha256")
+    if declared and str(declared).casefold() != digest.casefold():
+        return None
+    return RepairedCandidate(line_id, str(path), digest, outcome.action, str(outcome.attempt_id))
+
 def apply_repair(action: RepairAction, *, line_id: str, input_audio_sha256: str, reference_sha256: str | None, store: AttemptStore, executor: Callable[[RepairAction], Mapping[str, Any]] | None = None) -> RepairOutcome:
     signature=AttemptSignature(line_id,input_audio_sha256,action.strategy,action.parameters,reference_sha256)
     if store.seen(signature): return RepairOutcome("DUPLICATE_ATTEMPT",action,signature.digest(),diagnostics={"reason":"same causal attempt already recorded"})
@@ -67,4 +93,4 @@ def re_audit_repair(outcome: RepairOutcome, *, output_audio_path: str | Path, au
     passed = evidence.get("passed") is True
     return RepairOutcome("REPAIR_QA_PASS" if passed else "REPAIR_QA_FAIL", outcome.action, outcome.attempt_id, digest, {"output_audio_sha256": digest, "qa": evidence})
 
-__all__=["FailureCause","RepairAction","RepairOutcome","apply_repair","re_audit_repair"]
+__all__=["FailureCause","RepairAction","RepairOutcome","RepairedCandidate","apply_repair","re_audit_repair","repaired_candidate"]

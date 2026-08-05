@@ -14,7 +14,7 @@ from .audio import read
 from .alignment import AlignmentCache, AlignmentUnavailable, contrastive_align, language_id_evidence
 from .lid import LIDPolicy, independent_lid, fuse_language_evidence
 from .asr import ASRCache, DualASREvidence, prepare_whisperx_escalation, transcribe_dual
-from .contracts import DeliveryWindow, FailureClass, RunState
+from .contracts import CandidateArtifact, DeliveryWindow, FailureClass, RunState
 from .contracts.manifest import validate_scene_value
 from .generation_v2 import GenerationRuntimeV2, generate_cohort_v2
 from .hashing import atomic_json, contract_hash, sha256_bytes, sha256_file
@@ -37,7 +37,7 @@ from .performance_policy import policy_for
 from .model_pool import ModelIdentity, ModelPool
 from .state import StateStore
 from .attempts import AttemptStore
-from .repair import FailureCause, apply_repair, re_audit_repair
+from .repair import FailureCause, apply_repair, repaired_candidate
 from .repair_planner import plan_repairs
 
 
@@ -311,6 +311,8 @@ def _stage_bundle(option: dict[str, Any]) -> dict[str, Any]:
         "mfa_status": option.get("mfa_status"),
         "qa_route": option.get("qa_route"),
         "alignment_status": option.get("alignment_status"),
+        "repair_reinserted": bool(option.get("repair_reinserted")),
+        "repair_attempt_id": option.get("repair_attempt_id"),
         "error": option.get("error"),
     }
 
@@ -451,7 +453,7 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
     stage_counts = {name: 0 for name in ("RAW_TECHNICAL_QA", "PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA", "LINGUISTIC_ALIGNMENT", "SCENE_QA")}
     alignment_count = 0
 
-    def _record_repair(line: Line, option: dict[str, Any]) -> None:
+    def _record_repair(line: Line, option: dict[str, Any]):
         """Record one bounded causal action for a rejected candidate."""
         audit = option.get("mounted_audit") or option.get("processed_audit") or option.get("raw_audit")
         decision = ((audit.diagnostics if audit is not None else {}).get("linguistic_decision") or {})
@@ -468,15 +470,16 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
             cause = FailureCause.DETERMINISTIC_CALIBRATION if status == "BLOCKED" else FailureCause.SEAM_FAIL
         action = plan_repairs(cause, decision)
         if not action:
-            return
+            return None
         source_path = option.get("mounted_path") or option.get("processed_path") or getattr(option.get("candidate"), "raw_audio", None)
         if not source_path or not Path(source_path).is_file():
-            return
+            return None
         reference_hash = refs.get(line.id).audio_sha256 if refs.get(line.id) is not None else None
         outcome = apply_repair(action[0], line_id=line.id, input_audio_sha256=sha256_file(source_path), reference_sha256=reference_hash, store=repair_store, executor=repair_executor)
-        if repair_auditor is not None and outcome.diagnostics.get("output_audio_path"):
-            outcome = re_audit_repair(outcome, output_audio_path=outcome.diagnostics["output_audio_path"], auditor=repair_auditor)
+        if repair_auditor is not None:
+            outcome.diagnostics["legacy_repair_auditor"] = "IGNORED; repaired output must traverse the built-in QA stages"
         report["repair_attempts"].append({"line_id": line.id, "candidate_id": getattr(option.get("candidate"), "candidate_id", None), "cause": cause.value, "action": action[0].strategy, "outcome": outcome.status, "attempt_id": outcome.attempt_id, "diagnostics": outcome.diagnostics})
+        return outcome
     stage_counts["RAW_TECHNICAL_QA"] = sum(len(value) for value in cohort.evaluations.values())
     report["stage_evidence"]["RAW_TECHNICAL_QA"] = {"status": "EXECUTED", "artifact_count": stage_counts["RAW_TECHNICAL_QA"]}
 
@@ -708,6 +711,101 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
         _line_linguistic_summary(row, options, expected_text=line.effective_target_text, source_text=line.source_text, target_language=config.target_language)
         report["lines"].append(row)
 
+    def _integrate_repair(line: Line, outcome: Any) -> dict[str, Any] | None:
+        """Run an executed repair through the same artifact stages as TTS."""
+        repaired = repaired_candidate(outcome, line_id=line.id)
+        if repaired is None:
+            return None
+        performance = performance_by_line[line.id]
+        target_rate = int(stem_rate or config.sample_rate)
+        generation_hash = contract_hash("repair-candidate-v1", {"line_id": line.id, "attempt_id": repaired.attempt_id, "output_audio_sha256": repaired.output_audio_sha256})
+        candidate = CandidateArtifact(
+            candidate_id=f"{line.id}:repair:{repaired.attempt_id[:10]}", line_id=line.id,
+            generation_hash=generation_hash, processing_hash=None, qa_hash=None,
+            round_index=99, take_index=99, seed=None, raw_audio=repaired.output_audio_path,
+            processed_audio=None, mounted_delivery=None, status="REPAIRED",
+        )
+        candidate_root = out / "repair_candidates" / _safe_name(line.id) / _safe_name(repaired.attempt_id[:16])
+        try:
+            raw_evidence = _transcribe_evidence(asr, repaired.output_audio_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
+            raw_audio, raw_rate = read(repaired.output_audio_path, always_2d=True)
+            raw_audit = audit_candidate_stage(
+                repaired.output_audio_path, stage="RAW_TECHNICAL_QA", expected_text=line.effective_target_text,
+                source_text=line.source_text, target_sample_rate=int(getattr(config, "native_sample_rate", 24000)),
+                target_frames=None, channels=int(raw_audio.shape[1]), reference_end=None,
+                transcript=raw_evidence.forced_target.text if raw_evidence else None,
+                language=raw_evidence.automatic.language if raw_evidence else None,
+                language_probability=raw_evidence.automatic.probability if raw_evidence else None,
+                profile=profile, hard_gates=_line_hard_gates(config, performance),
+                final_word_min_tokens=config.qa.final_word_min_tokens, tail_guard_seconds=config.qa.tail_guard_ms / 1000.0,
+                require_asr=True, linguistic_evidence=raw_evidence.to_dict() if raw_evidence else None,
+                **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
+            )
+            stage_counts["RAW_TECHNICAL_QA"] += 1
+            processed = process_candidate(repaired.output_audio_path, target_sample_rate=target_rate, reference_end=(line.end - line.start) if scene.topology == "EMBEDDED_FMV" else None, ffmpeg=config.ffmpeg, tmpdir=out / "processing")
+            processed_path = persist_audio_atomic(candidate_root / "processed.wav", processed.audio, processed.sample_rate)
+            candidate = CandidateArtifact(**{**candidate.__dict__, "processing_hash": processed.processing_hash, "processed_audio": str(processed_path)})
+            stage_counts["PROCESSED_QA"] += 1
+            processed_evidence = _transcribe_evidence(asr, processed_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
+            processed_audit = audit_candidate_stage(
+                processed_path, stage="PROCESSED_QA", expected_text=line.effective_target_text, source_text=line.source_text,
+                target_sample_rate=target_rate, target_frames=None, channels=1,
+                reference_end=(line.end - line.start) if scene.topology == "EMBEDDED_FMV" else None,
+                transcript=processed_evidence.forced_target.text if processed_evidence else None,
+                language=processed_evidence.automatic.language if processed_evidence else None,
+                language_probability=processed_evidence.automatic.probability if processed_evidence else None,
+                profile=profile, hard_gates=_line_hard_gates(config, performance), final_word_min_tokens=config.qa.final_word_min_tokens,
+                tail_guard_seconds=config.qa.tail_guard_ms / 1000.0, require_asr=True,
+                linguistic_evidence=processed_evidence.to_dict() if processed_evidence else None,
+                **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value),
+            )
+            if not _audit_can_escalate(processed_audit):
+                return {"candidate": candidate, "raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": None, "serialized_audit": None, "processed_path": str(processed_path), "mounted_path": None, "mount_metrics": None, "processing_hash": processed.processing_hash, "eligible": False, "repair_attempt_id": repaired.attempt_id, "repair_reinserted": True}
+            if scene.topology == "EMBEDDED_FMV":
+                window = _line_window(line, stem_rate, scene.id, scene.dialogue_channel)
+                mounted_array, mount_metrics = mount_surgical(source_array, read(processed_path, always_2d=True)[0], target_rate, window, stem_rate, empalme_b=bool(line.preserved_source_intervals or line.source_resume is not None))
+                mounted_path = persist_audio_atomic(candidate_root / "mounted.wav", mounted_array, stem_rate)
+                delivery_clip, clip_frames = _line_delivery_clip(mounted_array, line, scene, stem_rate)
+                clip_path = persist_audio_atomic(candidate_root / "mounted_line.wav", delivery_clip, stem_rate)
+                mounted_evidence = _transcribe_evidence(asr, clip_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
+                stage_counts["MOUNTED_QA"] += 1
+                mounted_audit = audit_candidate_stage(clip_path, stage="MOUNTED_QA", expected_text=line.effective_target_text, source_text=line.source_text, target_sample_rate=stem_rate, target_frames=clip_frames, channels=1, reference_end=clip_frames / stem_rate, profile=profile, hard_gates=_line_hard_gates(config, performance), final_word_min_tokens=config.qa.final_word_min_tokens, tail_guard_seconds=config.qa.tail_guard_ms / 1000.0, preserved_ok=mount_metrics.preserved_hash_before == mount_metrics.preserved_hash_after, require_asr=True, linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence else None, **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value))
+                protected_ok, untouched_ok, _integrity = _scene_integrity(source_array, mounted_array, [line], scene, stem_rate)
+                stage_counts["SERIALIZED_QA"] += 1
+                serialized_audit = audit_scene_stage(mounted_path, stage="SERIALIZED_QA", expected_sample_rate=stem_rate, expected_frames=len(source_array), expected_channels=source_array.shape[1], protected_intervals_ok=protected_ok, untouched_channels_ok=untouched_ok)
+            else:
+                mounted_path = persist_audio_atomic(candidate_root / "mounted.wav", read(processed_path, always_2d=True)[0], target_rate)
+                delivery_clip, clip_frames = read(mounted_path, always_2d=True)
+                mounted_evidence = _transcribe_evidence(asr, mounted_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
+                stage_counts["MOUNTED_QA"] += 1
+                mounted_audit = audit_candidate_stage(mounted_path, stage="MOUNTED_QA", expected_text=line.effective_target_text, source_text=line.source_text, target_sample_rate=target_rate, target_frames=len(delivery_clip), channels=int(delivery_clip.shape[1]), reference_end=len(delivery_clip) / target_rate, profile=profile, hard_gates=_line_hard_gates(config, performance), final_word_min_tokens=config.qa.final_word_min_tokens, tail_guard_seconds=config.qa.tail_guard_ms / 1000.0, require_asr=True, linguistic_evidence=mounted_evidence.to_dict() if mounted_evidence else None, **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value))
+                stage_counts["SERIALIZED_QA"] += 1
+                serialized_evidence = _transcribe_evidence(asr, mounted_path, asr_cache, source_language=config.source_language, target_language=config.target_language)
+                serialized_audit = audit_candidate_stage(mounted_path, stage="SERIALIZED_QA", expected_text=line.effective_target_text, source_text=line.source_text, target_sample_rate=target_rate, target_frames=len(delivery_clip), channels=int(delivery_clip.shape[1]), reference_end=len(delivery_clip) / target_rate, profile=profile, hard_gates=_line_hard_gates(config, performance), final_word_min_tokens=config.qa.final_word_min_tokens, tail_guard_seconds=config.qa.tail_guard_ms / 1000.0, require_asr=True, linguistic_evidence=serialized_evidence.to_dict() if serialized_evidence else None, **_calibration_kwargs(config, alignment_backend, performance_mode=performance.mode.value))
+                mount_metrics = None
+            candidate = CandidateArtifact(**{**candidate.__dict__, "mounted_delivery": str(mounted_path)})
+            return {"candidate": candidate, "raw_audit": raw_audit, "processed_audit": processed_audit, "mounted_audit": mounted_audit, "serialized_audit": serialized_audit, "processed_path": str(processed_path), "mounted_path": str(mounted_path), "mount_metrics": mount_metrics, "processing_hash": processed.processing_hash, "eligible": False, "repair_attempt_id": repaired.attempt_id, "repair_reinserted": True}
+        except Exception as exc:
+            report["repair_attempts"].append({"line_id": line.id, "attempt_id": repaired.attempt_id, "outcome": "REPAIR_REINSERT_QA_ERROR", "error": str(exc)})
+            return None
+
+    # Execute bounded repairs before the independent alignment pass.  Newly
+    # created options are therefore subject to the same CTC/LID, serialized and
+    # final scene selectors as ordinary OmniVoice candidates.
+    for line in scene.lines:
+        original_options = list(options_by_line.get(line.id, []))
+        for option in original_options:
+            if option.get("eligible"):
+                continue
+            outcome = _record_repair(line, option)
+            if outcome is None:
+                continue
+            repaired_option = _integrate_repair(line, outcome)
+            if repaired_option is not None:
+                options_by_line.setdefault(line.id, []).append(repaired_option)
+                row_by_id[line.id]["candidate_stages"] = [_stage_bundle(item) for item in options_by_line[line.id]]
+
+    report["stage_evidence"]["RAW_TECHNICAL_QA"]["artifact_count"] = stage_counts["RAW_TECHNICAL_QA"]
     for stage in ("PROCESSED_QA", "MOUNTED_QA", "SERIALIZED_QA"):
         report["stage_evidence"][stage] = {"status": "EXECUTED" if stage_counts[stage] else "NOT_RUN", "artifact_count": stage_counts[stage]}
 
@@ -871,14 +969,6 @@ def run_scene_v2(scene: Scene, config: Any, *, runtime: GenerationRuntimeV2, asr
                 option["alignment_error"] = str(exc)
         _line_linguistic_summary(row, options, expected_text=line.effective_target_text, source_text=line.source_text, target_language=config.target_language)
         row["candidate_stages"] = [_stage_bundle(option) for option in options]
-
-    # Repairs are evidence records, not hidden retries.  A caller may provide
-    # a concrete technical executor; without one the outcome remains an
-    # explicit BLOCKED_NO_EXECUTOR/HOLD_NO_TTS record.
-    for line in scene.lines:
-        for option in options_by_line.get(line.id, []):
-            if not option.get("eligible"):
-                _record_repair(line, option)
 
     report["stage_evidence"]["LINGUISTIC_ALIGNMENT"] = {
         "status": "EXECUTED" if alignment_count else "NOT_RUN",
