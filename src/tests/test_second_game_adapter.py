@@ -5,7 +5,7 @@ from pathlib import Path
 from dubbing_pipeline.benchmark import BenchmarkManifest, build_invocation_receipt, run_benchmark, trusted_runner_identity, validate_manifest, verify_benchmark_row, _ast_calls_run_scene
 from dubbing_pipeline.hashing import canonical_json, contract_hash, sha256_bytes, sha256_file
 from adapters.second_game_template import SecondGameAdapter
-from dubbing_pipeline.attestation import sign_attestation, verify_attestation, subject_digest
+from dubbing_pipeline.attestation import sign_attestation, validate_trust_store, verify_attestation, verify_trusted_attestation
 
 class FinalValidationTests(unittest.TestCase):
     def test_manifest_identity_and_rate(self):
@@ -89,5 +89,18 @@ class FinalValidationTests(unittest.TestCase):
         signed = sign_attestation(subject, private_b64, key_id="ci")
         self.assertTrue(verify_attestation(signed, public, expected_subject=subject, expected_commit="a" * 40))
         self.assertFalse(verify_attestation({"verified": True}, public, expected_subject=subject, expected_commit="a" * 40))
+
+    def test_attestation_requires_pinned_trust_anchor_and_scope(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        import base64, hashlib
+        private = Ed25519PrivateKey.generate(); public = base64.b64encode(private.public_key().public_bytes_raw()).decode("ascii"); private_b64 = base64.b64encode(private.private_bytes_raw()).decode("ascii")
+        anchor = {"algorithm": "ed25519", "public_key": public, "public_key_sha256": hashlib.sha256(base64.b64decode(public)).hexdigest(), "allowed_repository": "skovor/dubproj", "allowed_workflow": ".github/workflows/ci.yml"}
+        store = {"schema": "attestation-trust-store-v1", "keys": {"ci": anchor}}
+        subject = {"schema": "benchmark-attestation-subject-v1", "repository": "skovor/dubproj", "workflow": ".github/workflows/ci.yml", "manifest_digest": "m", "code_commit": "a" * 40, "benchmark_payload_sha256": "b" * 64, "runner_source_sha256": "c" * 64}
+        signed = sign_attestation(subject, private_b64, key_id="ci")
+        self.assertTrue(verify_trusted_attestation(signed, store, key_id="ci", expected_subject=subject, expected_commit="a" * 40, repository="skovor/dubproj", workflow=".github/workflows/ci.yml"))
+        self.assertFalse(verify_trusted_attestation(signed, store, key_id="attacker", expected_subject=subject, expected_commit="a" * 40, repository="skovor/dubproj", workflow=".github/workflows/ci.yml"))
+        self.assertFalse(verify_trusted_attestation(signed, {"schema": "attestation-trust-store-v1", "keys": {"ci": {**anchor, "allowed_repository": "evil/repo"}}}, key_id="ci", expected_subject=subject, expected_commit="a" * 40, repository="skovor/dubproj", workflow=".github/workflows/ci.yml"))
+        with self.assertRaises(ValueError): validate_trust_store({"schema": "attestation-trust-store-v1", "keys": {"ci": {**anchor, "public_key_sha256": "0" * 64}}})
 
 if __name__=="__main__": unittest.main()

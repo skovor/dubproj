@@ -5,7 +5,7 @@ from pathlib import Path
 import hashlib, importlib, inspect, subprocess, sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dubbing_pipeline.benchmark import BenchmarkManifest, validate_manifest, verify_benchmark_row, _ast_calls_run_scene
-from dubbing_pipeline.attestation import subject_digest, verify_attestation
+from dubbing_pipeline.attestation import load_trust_store, subject_digest, verify_trusted_attestation
 
 
 def _load_adapter(entrypoint: str, repository_root: Path):
@@ -42,7 +42,7 @@ def execute_second_game_adapter(descriptor: dict, repository_root: Path, *, expe
         return {"valid": False, "errors": [f"SECOND_GAME_ADAPTER_ERROR:{exc}"]}
 
 def main()->int:
-    p=argparse.ArgumentParser(); p.add_argument("benchmark"); p.add_argument("second_game"); p.add_argument("--manifest", required=True); p.add_argument("--expected-commit", required=True); p.add_argument("--attestation-public-key", required=True); args=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument("benchmark"); p.add_argument("second_game"); p.add_argument("--manifest", required=True); p.add_argument("--expected-commit", required=True); p.add_argument("--attestation-trust-store", required=True); p.add_argument("--attestation-key-id", required=True); args=p.parse_args()
     benchmark_path, second_path, manifest_path = Path(args.benchmark), Path(args.second_game), Path(args.manifest)
     benchmark=json.loads(benchmark_path.read_text(encoding="utf-8")); second_descriptor=json.loads(second_path.read_text(encoding="utf-8")); manifest_value=json.loads(manifest_path.read_text(encoding="utf-8")); errors=[]
     expected_evidence = hashlib.sha256(json.dumps({key: value for key, value in benchmark.items() if key != "evidence_sha256"}, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -52,10 +52,11 @@ def main()->int:
     if actual_commit != args.expected_commit: errors.append({"code":"COMMIT_MISMATCH","expected":args.expected_commit,"actual":actual_commit})
     if manifest.commit != args.expected_commit: errors.append({"code":"MANIFEST_COMMIT_MISMATCH","expected":args.expected_commit,"actual":manifest.commit})
     unsigned_payload={key: value for key, value in benchmark.items() if key not in {"evidence_sha256", "attestation"}}
-    subject={"schema":"benchmark-attestation-subject-v1","manifest_digest":benchmark.get("manifest_digest"),"code_commit":manifest.commit,"benchmark_payload_sha256":subject_digest(unsigned_payload)}
+    runner_source_sha = str((benchmark.get("runner_identity") or {}).get("source_sha256", ""))
+    subject={"schema":"benchmark-attestation-subject-v1","repository":"skovor/dubproj","workflow":".github/workflows/ci.yml","manifest_digest":benchmark.get("manifest_digest"),"code_commit":manifest.commit,"benchmark_payload_sha256":subject_digest(unsigned_payload),"runner_source_sha256":runner_source_sha}
     try:
-        public_key=Path(args.attestation_public_key).read_text(encoding="utf-8").strip()
-        if not verify_attestation(benchmark.get("attestation") or {}, public_key, expected_subject=subject, expected_commit=args.expected_commit): errors.append({"code":"BENCHMARK_ATTESTATION_INVALID"})
+        trust_store=load_trust_store(args.attestation_trust_store)
+        if not verify_trusted_attestation(benchmark.get("attestation") or {}, trust_store, key_id=args.attestation_key_id, expected_subject=subject, expected_commit=args.expected_commit, repository="skovor/dubproj", workflow=".github/workflows/ci.yml"): errors.append({"code":"BENCHMARK_ATTESTATION_INVALID"})
     except Exception as exc:
         errors.append({"code":"BENCHMARK_ATTESTATION_KEY_INVALID","details":str(exc)})
     validation=validate_manifest(manifest, require_files=True)

@@ -22,7 +22,7 @@ def main()->int:
         runner=getattr(importlib.import_module(module_name), function_name)
         payload=run_benchmark(manifest, runner, require_files=True, require_trusted_runner=True).to_dict()
         payload={"schema":"benchmark-result-v2","status":"EXECUTED",**payload}
-    subject = {"schema": "benchmark-attestation-subject-v1", "manifest_digest": payload.get("manifest_digest"), "code_commit": manifest.commit, "benchmark_payload_sha256": subject_digest(payload)}
+    subject = {"schema": "benchmark-attestation-subject-v1", "repository": "skovor/dubproj", "workflow": ".github/workflows/ci.yml", "manifest_digest": payload.get("manifest_digest"), "code_commit": manifest.commit, "benchmark_payload_sha256": subject_digest(payload), "runner_source_sha256": str((payload.get("runner_identity") or {}).get("source_sha256", ""))}
     if args.attestation_private_key:
         if not args.attestation_key_id: raise SystemExit("--attestation-key-id is required with --attestation-private-key")
         payload["attestation"] = sign_attestation(subject, Path(args.attestation_private_key).read_text(encoding="utf-8").strip(), key_id=args.attestation_key_id)

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dubproj attestation trust store",
+  "type": "object",
+  "required": ["schema", "keys"],
+  "properties": {
+    "schema": {"const": "attestation-trust-store-v1"},
+    "keys": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["algorithm", "public_key", "public_key_sha256", "allowed_repository", "allowed_workflow"],
+        "properties": {
+          "algorithm": {"const": "ed25519"},
+          "public_key": {"type": "string"},
+          "public_key_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+          "allowed_repository": {"type": "string", "minLength": 1},
+          "allowed_workflow": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
