@@ -5,12 +5,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from .train import CalibrationArtifact
-from .validate import ValidationReport, evaluate, predict_artifact
+from .validate import ValidationReport, evaluate
 
 class PromotionError(ValueError): pass
 
 def _prediction_digest(report: ValidationReport) -> str:
     return hashlib.sha256(json.dumps(list(report.predictions), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _content_digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(dict(value), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _artifact_spec(value: Mapping[str, Any], role: str, identity: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -133,14 +137,33 @@ def promote_profile(*, profile_id: str, target_artifact: CalibrationArtifact | M
     anchor = final_anchor_artifact.to_dict() if isinstance(final_anchor_artifact, CalibrationArtifact) else dict(final_anchor_artifact)
     lid = lid_artifact.to_dict() if isinstance(lid_artifact, CalibrationArtifact) else dict(lid_artifact)
     target_spec, target_payload = _artifact_spec(artifact, "target", identity); anchor_spec, anchor_payload = _artifact_spec(anchor, "final_anchor", identity); lid_spec, lid_payload = _artifact_spec(lid, "lid", identity)
+    report_digests = {role: {split: _prediction_digest(ValidationReport(**report)) for split, report in role_reports.items()} for role, role_reports in reports.items()}
+    # The receipt is deliberately a separate, content-addressed object.  It
+    # contains every input identity which can affect a promotion decision but
+    # excludes timestamps and the receipt hash itself, so it can be rehashed
+    # independently by runtime QA.
+    receipt_payload = {
+        "schema": "dubproj-promotion-receipt-v1", "profile_id": profile_id,
+        "code_commit": str(provenance["code_commit"]).lower(),
+        "artifact_sha256": {"target": target_spec["artifact_sha256"], "final_anchor": anchor_spec["artifact_sha256"], "lid": lid_spec["artifact_sha256"]},
+        "dataset_sha256": dict(hashes),
+        "lock_sha256": {"runtime": str(provenance["runtime_lock_sha256"]).lower(), "models": str(provenance["models_lock_sha256"]).lower()},
+        "report_prediction_sha256": report_digests,
+    }
+    destination = Path(output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path = destination.with_suffix(destination.suffix + ".promotion_receipt.json")
+    receipt_bytes = (json.dumps(receipt_payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
     profile = {
         "schema": "generic-dubbing-alignment-calibration-profile-v2", "status": "VALIDATED", "authority": True, "profile_id": profile_id,
         "identity": dict(identity), "thresholds": {key: float(value) for key, value in thresholds.items()},
         "calibrators": {"target": target_spec, "final_anchor": anchor_spec, "lid": lid_spec},
         "dataset": {**hashes, "calibration_count": int(artifact.get("sample_count", 0)), "validation_count": validation.count, "hidden_test_count": hidden.count},
         "metrics": {"hidden_false_pass_count": hidden.false_pass_count, "hidden_false_fail_count": hidden.false_fail_count, "brier_score": hidden.brier_score, "expected_calibration_error": hidden.expected_calibration_error, "validation": validation.to_dict(), "validation_predictions_sha256": _prediction_digest(validation), "hidden_predictions_sha256": _prediction_digest(hidden), "reports": reports, "recomputed": True},
-        "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id},
+        "provenance": {**dict(provenance), "created_at": datetime.now(timezone.utc).isoformat(), "hidden_test_run_id": hidden.run_id, "promotion_receipt_path": str(receipt_path), "promotion_receipt_sha256": receipt_sha},
     }
-    destination = Path(output); destination.parent.mkdir(parents=True, exist_ok=True); destination.write_text(json.dumps(profile, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); return profile
+    destination.write_text(json.dumps(profile, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"); return profile
 
 __all__ = ["PromotionError", "promote_profile"]

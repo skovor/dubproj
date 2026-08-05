@@ -620,6 +620,8 @@ def calibration_profile_status(
     calibrator_root: str | Path | None = None,
     runtime_lock_sha256: str | None = None,
     models_lock_sha256: str | None = None,
+    expected_code_commit: str | None = None,
+    require_promotion_receipt: bool = False,
 ) -> str:
     """Validate the complete artifact that is allowed to grant QA authority."""
     if not authority:
@@ -726,6 +728,35 @@ def calibration_profile_status(
         return "BLOCKED_RUNTIME_LOCK_UNAVAILABLE"
     if str(provenance["runtime_lock_sha256"]).casefold() != str(runtime_lock_sha256).casefold() or str(provenance["models_lock_sha256"]).casefold() != str(models_lock_sha256).casefold():
         return "BLOCKED_RUNTIME_MODEL_MISMATCH"
+    if expected_code_commit is not None and str(provenance.get("code_commit", "")).casefold() != str(expected_code_commit).casefold():
+        return "BLOCKED_CODE_COMMIT_MISMATCH"
+    receipt_sha = provenance.get("promotion_receipt_sha256")
+    receipt_path_value = provenance.get("promotion_receipt_path")
+    if require_promotion_receipt and (not receipt_sha or not receipt_path_value):
+        return "BLOCKED_PROMOTION_RECEIPT"
+    if receipt_sha or receipt_path_value:
+        if not isinstance(receipt_sha, str) or not _SHA256.fullmatch(receipt_sha):
+            return "BLOCKED_PROMOTION_RECEIPT"
+        receipt_path = Path(str(receipt_path_value))
+        if not receipt_path.is_absolute() and calibrator_root is not None:
+            receipt_path = Path(calibrator_root) / receipt_path
+        if not receipt_path.is_file():
+            return "BLOCKED_PROMOTION_RECEIPT"
+        try:
+            receipt_bytes = receipt_path.read_bytes()
+            if sha256_bytes(receipt_bytes).casefold() != receipt_sha.casefold():
+                return "BLOCKED_PROMOTION_RECEIPT"
+            receipt = json.loads(receipt_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return "BLOCKED_PROMOTION_RECEIPT"
+        if not isinstance(receipt, Mapping) or receipt.get("schema") != "dubproj-promotion-receipt-v1" or str(receipt.get("profile_id", "")) != str(profile.get("profile_id", "")) or str(receipt.get("code_commit", "")).casefold() != str(provenance.get("code_commit", "")).casefold():
+            return "BLOCKED_PROMOTION_RECEIPT"
+        receipt_artifacts = receipt.get("artifact_sha256")
+        if not isinstance(receipt_artifacts, Mapping) or any(str(receipt_artifacts.get(role, "")).casefold() != str(calibrators[role].get("artifact_sha256", "")).casefold() for role in ("target", "final_anchor", "lid")):
+            return "BLOCKED_PROMOTION_RECEIPT"
+        receipt_locks = receipt.get("lock_sha256")
+        if not isinstance(receipt_locks, Mapping) or str(receipt_locks.get("runtime", "")).casefold() != str(provenance.get("runtime_lock_sha256", "")).casefold() or str(receipt_locks.get("models", "")).casefold() != str(provenance.get("models_lock_sha256", "")).casefold():
+            return "BLOCKED_PROMOTION_RECEIPT"
     return "MATCHED_VALIDATED"
 
 
