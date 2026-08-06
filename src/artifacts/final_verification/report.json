@@ -36,7 +36,7 @@
     "note": "Run #71 is the exact HEAD evidence. Full-suite and four platform-smoke jobs succeeded; ML import remains explicitly skipped unless workflow_dispatch is used."
   },
   "branch": "refactor/p3r-pipeline-v2",
-  "audit_spec": "docs/AUDITORIA_PROFUNDA_DUBPROJ_27ca23e.md",
+  "audit_spec": "PROMPT_CODEX_CIERRE_5824FD5.md + AUDITORIA_5824FD5_INTEGRIDAD_FINAL.md (provided inputs)",
   "installation": {
     "python": "3.12.13",
     "torch": "2.8.0+cu128",

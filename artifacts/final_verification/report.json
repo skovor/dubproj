@@ -3,6 +3,7 @@
   "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
   "validated_code_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
   "branch": "refactor/p3r-pipeline-v2",
+  "audit_spec": "PROMPT_CODEX_CIERRE_5824FD5.md + AUDITORIA_5824FD5_INTEGRIDAD_FINAL.md (provided inputs)",
   "validated_remote_code_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
   "evidence_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
   "documentation_note": "This report is an evidence-only follow-up; the validated runtime/workflow commit remains 627b84b.",
