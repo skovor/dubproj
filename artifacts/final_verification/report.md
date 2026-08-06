@@ -1,35 +1,62 @@
-# Verificacion final D6F53D4
+# Verificación final — cierre 5824FD5
 
-Estado tecnico: `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`
+**Estado:** `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`
 
-El codigo validado esta en `refactor/p3r-pipeline-v2` con SHA `ad1eddb2f64cb4f4add2514de0d839d314f436c3`. `git rev-parse HEAD` y `git ls-remote origin refs/heads/refactor/p3r-pipeline-v2` coincidieron con ese SHA antes del commit documental `642cc997432ef33b81a388972a755c0c5258b722`. Ese commit solo anade evidencia y no cambia la logica validada.
+La corrección funcional se ejecutó sobre `refactor/p3r-pipeline-v2` y quedó en
+`627b84bb2526b2af028a39b8fa7b1dfddcfa4986`. El SHA local y el remoto coinciden.
+Este documento y `report.json` son evidencia documental posterior; no alteran el
+código validado.
 
-## Resultado de la implementacion
+## Cinco commits funcionales
 
-Se publicaron los 10 commits correctivos del prompt, en orden, sin reescritura ni force-push. Las correcciones cubren receipts de calibracion, paridad LID/CTC, aislamiento hidden, reinsercion de reparaciones, performance medida/categorica, canal de dialogo estereo, busqueda FMV acotada, benchmark/adapter verificables, bloqueo de transcript legacy y pruebas transversales.
+| Commit | Corrección | Evidencia local |
+|---|---|---|
+| `bf72d3d1015a73acde9d60b000e7872083719b85` | Etiquetas hidden y receipts del bridge autoritativas | 28 pruebas focalizadas |
+| `a5524cd5dd85c5bf067177034b77a4e3483de018` | Checkout observado por Git separado del SHA declarado | 73 pruebas focalizadas |
+| `0a7420c3dc444e027c42cb3fc36412f267bceade` | Trust store Ed25519 para atestaciones | 18 pruebas focalizadas |
+| `bb1e49bf95ee61e764bc05e9bde1b54f26372473` | Procedencia firmada y límites del adapter del segundo juego | 14 pruebas focalizadas |
+| `627b84bb2526b2af028a39b8fa7b1dfddcfa4986` | Dependencia de atestación instalada en CI | CI #71 verde sobre este SHA |
 
-La integracion nueva ejercita gold set -> adjudicacion -> archivos por split -> entrenamiento -> validacion -> promocion -> runtime, mutacion de receipt, LID raw/calibrated, hidden one-shot, busqueda FMV, canal estereo, hashes de artefactos y ejecucion del adapter. Es una prueba sintetica controlada; no se presenta como audio de juego.
+Cada commit fue probado, verificado con `git diff --check HEAD^..HEAD`, publicado
+sin force-push y comprobado contra `git ls-remote`.
 
-## Pruebas y comandos
+## Evidencia CI independiente
 
-- `cd src; .venv\\Scripts\\python.exe -m pytest -q`: **167 passed, 3 skipped, 11 subtests passed**, codigo 0.
-- `cd src; .venv\\Scripts\\python.exe -m unittest discover -s tests -p "test*.py"`: **145 tests OK**, codigo 0.
-- `cd src; .venv\\Scripts\\python.exe -m compileall -q .`: codigo 0.
-- `src\\scripts\\release_check.py --out artifacts\\final_verification\\release_check.json`: codigo 0. El release check ejecuto compileall, pytest completo, smoke generico, `tests/run_v2.py`, `check_port.py` y `validate_instructions.py`; no ejecuta `unittest discover` ni `pip check`.
-- `cd src; .venv\\Scripts\\python.exe -m pip check`: `No broken requirements found`, codigo 0.
-- `git diff --check`: codigo 0.
+Workflow: `.github/workflows/ci.yml` (`generic-dubbing-ci`)
 
-Los tres skips son historicos y explicitos: requieren el checkout externo de OmniVoice/P3R y no equivalen a validacion.
+- Run: [#71](https://github.com/skovor/dubproj/actions/runs/31057970313), ID `31057970313`.
+- `head_sha`: `627b84bb2526b2af028a39b8fa7b1dfddcfa4986`.
+- `full-suite`: `success` (job `92479547881`).
+- `platform-smoke`: los cuatro jobs Ubuntu/Windows con Python 3.10/3.12, todos `success`.
+- `ml-import-contracts`: `skipped` porque solo se ejecuta con `workflow_dispatch`; no se presenta como evidencia ML.
+- Artefacto: `release-check-31057970313`, ID `8951002036`, digest
+  `sha256:be521a1b5c3f27c4e183203cce8a29a03f21fd6410a257e99c10e9a4c5d41536`.
 
-## Bloqueos reales
+## Verificación local reproducible
 
-- P3R: `BLOCKED`; no hay assets/audio verificables disponibles en este workspace.
-- DQ3 HD-2D: `BLOCKED`; no hay assets/audio verificables disponibles.
-- OmniVoice GPU, WhisperX, SpeechBrain y MFA en CI: `NOT_RUN`.
-- Gold set humano doblemente revisado: `PENDING`.
-- `calibration_authority`: permanece `false`.
-- No se observo una ejecucion CI independiente asociada al SHA validado; el push remoto si fue comprobado por SHA.
+- `PYTHONPATH=src src/.venv/Scripts/python.exe -m pytest -q`: código `0`, **184 passed, 3 skipped, 3 warnings, 11 subtests**, 6.88 s.
+- `PYTHONPATH=src src\.venv\Scripts\python.exe -m unittest discover -s src/tests -p 'test_*.py' -q`: código `0`, **162 tests OK**, 5.086 s.
+- `cd src; .venv\Scripts\python.exe -m compileall -q .`: código `0`.
+- `cd src; .venv\Scripts\python.exe -m pip check`: `No broken requirements found`.
+- `src\scripts\release_check.py --skip-pytest --out src\artifacts\final_verification\release_check.json`: código `0`.
+- `git diff --check`: código `0`.
 
-Por esas razones no se afirma calidad acustica real, promocion productiva ni validacion de juego. Los limites P2 (desempate de alineacion y unidad acustica del apostrofe) quedan documentados; no son P0/P1.
+Los skips y el job ML son explícitos; no representan audio real ni modelos cargados.
 
-La matriz completa de hallazgos y la evidencia por commit estan en `artifacts/final_verification/report.json`.
+## Matriz de integridad y límites
+
+Los cuatro hallazgos de la auditoría (`hidden` autoritativo, identidad de checkout,
+trust anchor y procedencia del segundo juego) están `VERIFIED` mediante código,
+pruebas adversariales y la ejecución CI indicada. El CI solo cubre contratos CPU y
+smoke multiplataforma.
+
+P3R y Dragon Quest III HD-2D permanecen `BLOCKED`: no hay escenas extraídas con
+timing/subtítulos ni extractor autorizado disponible. No se inventaron 20 líneas,
+FMV, benchmark, gold set ni resultados OmniVoice. `calibration_authority` permanece
+`false`; WhisperX, SpeechBrain, MFA y OmniVoice GPU no se ejecutaron en CI.
+
+El resultado de release/CI demuestra integridad de software y reproducibilidad del
+repositorio, no calidad acústica ni validación dentro de un juego.
+
+La matriz completa, hashes y estados está en
+[`report.json`](report.json).

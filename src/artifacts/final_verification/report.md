@@ -1,40 +1,35 @@
-# Verificacion final de Dubproj
+# Verificación final — cierre 5824FD5
 
 **Estado:** `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`
 
-Codigo auditado: `cca8466f072a71cb38f921d5f2b115fe0da7f474` en
-`refactor/p3r-pipeline-v2`. La matriz completa esta en `report.json`.
+La matriz canónica está en [`../../../artifacts/final_verification/report.json`](../../../artifacts/final_verification/report.json).
+El código funcional validado es `627b84bb2526b2af028a39b8fa7b1dfddcfa4986` en
+`refactor/p3r-pipeline-v2`; el SHA local y el remoto coinciden.
 
-## Pruebas reproducibles
+## Commits de esta corrección
 
-- `PYTHONPATH=src src/.venv/Scripts/python.exe -m pytest -q`: codigo `0`, `172 passed, 3 skipped, 11 subtests passed`.
-- `PYTHONPATH=src src/.venv/Scripts/python.exe -m unittest discover -s src/tests -p test_*.py -q`: codigo `0`, `150 tests OK`.
-- `src/scripts/release_check.py --skip-pytest --out src/artifacts/release_check_ad1eddb.json`: codigo `0`, `PASS`.
-- `pip check`: `No broken requirements found`.
-- `compileall`, smoke, V2, portabilidad e instrucciones: todos `returncode=0` en el release check.
+1. `bf72d3d1015a73acde9d60b000e7872083719b85` — labels hidden y bridge autoritativos.
+2. `a5524cd5dd85c5bf067177034b77a4e3483de018` — identidad observada por Git.
+3. `0a7420c3dc444e027c42cb3fc36412f267bceade` — trust store Ed25519.
+4. `bb1e49bf95ee61e764bc05e9bde1b54f26372473` — procedencia firmada del segundo juego.
+5. `627b84bb2526b2af028a39b8fa7b1dfddcfa4986` — instalación de attestation en CI.
 
-## Cierre AD1EDDB: cuatro commits atomicos + hotfix de integridad
+## CI del HEAD exacto
 
-| Commit | Correccion | Evidencia |
-|---|---|---|
-| `623379333dd932bb05c7ced103d06cca3dc91724` | Finalizacion oculta autoritativa en SQLite y consumo one-shot | 17/17 tests afectados |
-| `e4f1d9a56739f61249a13743ad0cb350872e2eb6` | SHA exacto de calibracion antes de TTS e identidad unica de alineador | 75/75 tests afectados |
-| `3009e7b9855570ae8095864ace75d055fdec3c1d` | Recibo de invocacion de escena y atestacion Ed25519; booleanos rechazados | 26/26 tests afectados |
-| `e0f768676ded243f8624ef164a375bb773389a9e` | Decodificacion y procedencia content-addressed del segundo juego | 172 pytest; 150 unittest |
-| `cca8466f072a71cb38f921d5f2b115fe0da7f474` | Hotfix: el SHA esperado debe coincidir con el checkout que ejecuta TTS | 68 focused pytest; suite completa repetida |
+La ejecución [#71](https://github.com/skovor/dubproj/actions/runs/31057970313), ID
+`31057970313`, terminó `success` sobre `627b84b…`. `full-suite` y los cuatro
+`platform-smoke` (Ubuntu/Windows, Python 3.10/3.12) fueron `success`; el job
+`ml-import-contracts` quedó `skipped` por su condición `workflow_dispatch`.
+El artefacto `release-check-31057970313` tiene ID `8951002036` y digest
+`sha256:be521a1b5c3f27c4e183203cce8a29a03f21fd6410a257e99c10e9a4c5d41536`.
 
-Los cuatro hallazgos nuevos de la auditoria estan `VERIFIED` en `report.json`. La
-dependencia de firma esta declarada en `src/pyproject.toml` y fijada en
-`src/constraints-ci.txt`. No se fabrico ninguna firma, benchmark o resultado de audio real.
+## Pruebas locales
 
-## Que queda bloqueado
+- `pytest -q`: **184 passed, 3 skipped, 3 warnings, 11 subtests**, código 0.
+- `unittest discover`: **162 tests OK**, código 0.
+- `compileall`, `pip check`, `git diff --check` y `release_check --skip-pytest`: código 0.
 
-Se intento P3R y DQ3, pero no hay clips extraidos con subtitulos/timing ni extractor
-autorizado disponible: las instalaciones permanecen en contenedores propietarios.
-Por tanto no se declara validacion de juego, ni se inventan 20 lineas, FMV o un
-benchmark. El estado permitido es `IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED`.
-
-Limitaciones restantes: obtener un extractor autorizado y ejecutar el adapter sobre
-audio real; completar un gold set humano; y proporcionar un `repair_executor` real
-para reparaciones tecnicas. La ausencia de esos recursos queda bloqueada, no produce
-regeneraciones arbitrarias ni falsos `FINAL_PASS`.
+No se declara audio real: P3R y DQ3 siguen bloqueados por ausencia de assets
+extraídos, timing/subtítulos verificables y extractor autorizado. No se inventaron
+benchmarks, gold labels ni resultados OmniVoice. `calibration_authority` sigue en
+`false`.

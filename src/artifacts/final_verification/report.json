@@ -1,25 +1,25 @@
 {
-  "schema": "dubproj-final-verification-v1",
+  "schema": "dubproj-final-verification-v3",
   "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
-  "validated_code_commit": "cca8466f072a71cb38f921d5f2b115fe0da7f474",
+  "validated_code_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
   "ci": {
     "workflow": ".github/workflows/ci.yml",
-    "workflow_commit": "878c140a05d0184b2f86bde745556725698209c0",
+    "workflow_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
     "configured": true,
-    "evidence_head_sha": "878c140a05d0184b2f86bde745556725698209c0",
-    "run_id": 31041358093,
-    "run_number": 38,
-    "job_id": 92426223541,
+    "evidence_head_sha": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
+    "run_id": 31057970313,
+    "run_number": 71,
+    "job_id": 92479547881,
     "status": "completed",
     "conclusion": "success",
     "runner": "ubuntu-24.04",
     "python": "3.12.13",
-    "pytest_result": "172 passed, 3 skipped",
+    "pytest_result": "184 passed, 3 skipped, 3 warnings, 11 subtests passed in 6.88s",
     "release_gates": "success",
-    "artifact_id": 8944711017,
-    "artifact_name": "release-check-31041358093",
-    "artifact_sha256": "4345e124c090361ee7637099db6aa88a6ffb2917c4f756493b4d97f0a7e4655e",
-    "observed_at": "2026-08-05T19:52:55Z",
+    "artifact_id": 8951002036,
+    "artifact_name": "release-check-31057970313",
+    "artifact_sha256": "be521a1b5c3f27c4e183203cce8a29a03f21fd6410a257e99c10e9a4c5d41536",
+    "observed_at": "2026-08-05T23:56:09Z",
     "scope": {
       "core_contracts": "VERIFIED",
       "optional_ml_backends": "NOT_RUN",
@@ -33,7 +33,7 @@
       "workflow_commit": "commit that introduced the workflow used for the recorded run",
       "evidence_head_sha": "exact checkout tested by the recorded GitHub run"
     },
-    "note": "This immutable run validates the pinned-action, constraints, isolated-venv and platform-matrix workflow. The manual ML import job remains intentionally separate and must produce its own evidence when dispatched."
+    "note": "Run #71 is the exact HEAD evidence. Full-suite and four platform-smoke jobs succeeded; ML import remains explicitly skipped unless workflow_dispatch is used."
   },
   "branch": "refactor/p3r-pipeline-v2",
   "audit_spec": "docs/AUDITORIA_PROFUNDA_DUBPROJ_27ca23e.md",
@@ -56,10 +56,10 @@
   "tests": {
     "command": "PYTHONPATH=src src/.venv/Scripts/python.exe -m pytest -q",
     "exit_code": 0,
-    "result": "172 passed, 3 skipped, 11 subtests passed in 6.36s",
-    "release_command": "scripts/release_check.py --out artifacts/release_check_local.json",
+    "result": "184 passed, 3 skipped, 3 warnings, 11 subtests passed in 6.88s",
+    "release_command": "scripts/release_check.py --skip-pytest --out artifacts/final_verification/release_check.json",
     "release_exit_code": 0,
-    "release_result": "PASS; compileall, smoke, V2, portability and instructions; full pytest discovery passed separately"
+    "release_result": "PASS; compileall, smoke, V2, portability and instructions; full pytest discovery and unittest discovery passed separately"
   },
   "latest_audit_closure": {
     "specification": "PROMPT_CODEX_CIERRE_PROMOCION_AD1EDDB.md",
@@ -79,6 +79,21 @@
     ],
     "real_validation": "BLOCKED",
     "blocking_requirement": "No extracted P3R or DQ3 scene assets, subtitle timing manifest, or authorized extractor was available; no real audio/benchmark result is claimed."
+  },
+  "closure_5824fd5": {
+    "specification": "PROMPT_CODEX_CIERRE_5824FD5.md",
+    "audit": "AUDITORIA_5824FD5_INTEGRIDAD_FINAL.md",
+    "functional_commits": [
+      {"sha": "bf72d3d1015a73acde9d60b000e7872083719b85", "subject": "Recompute authoritative hidden labels and bridge evidence", "tests": "28 focused tests"},
+      {"sha": "a5524cd5dd85c5bf067177034b77a4e3483de018", "subject": "Compare declared build commit with independently observed checkout", "tests": "73 focused tests"},
+      {"sha": "0a7420c3dc444e027c42cb3fc36412f267bceade", "subject": "Pin benchmark attestation trust anchors", "tests": "18 focused tests"},
+      {"sha": "bb1e49bf95ee61e764bc05e9bde1b54f26372473", "subject": "Bind second game extraction to signed provenance", "tests": "14 focused tests"},
+      {"sha": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986", "subject": "Install attestation dependencies in CI", "tests": "CI run 31057970313 on exact HEAD"}
+    ],
+    "ci_head": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
+    "ci_run": 31057970313,
+    "ci_conclusion": "success",
+    "real_validation": "BLOCKED"
   },
   "benchmark": {
     "status": "BLOCKED",

@@ -1,10 +1,36 @@
 {
-  "schema": "dubproj-final-verification-v2",
+  "schema": "dubproj-final-verification-v3",
   "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED",
-  "validated_code_commit": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
+  "validated_code_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
   "branch": "refactor/p3r-pipeline-v2",
-  "validated_remote_code_commit": "ad1eddb2f64cb4f4add2514de0d839d314f436c3",
-  "evidence_commit": "642cc997432ef33b81a388972a755c0c5258b722",
+  "validated_remote_code_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
+  "evidence_commit": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
+  "documentation_note": "This report is an evidence-only follow-up; the validated runtime/workflow commit remains 627b84b.",
+  "ci": {
+    "workflow": ".github/workflows/ci.yml",
+    "workflow_name": "generic-dubbing-ci",
+    "run_id": 31057970313,
+    "run_number": 71,
+    "head_sha": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
+    "status": "completed",
+    "conclusion": "success",
+    "observed_at": "2026-08-05T23:56:09Z",
+    "jobs": {
+      "full-suite": {"id": 92479547881, "status": "completed", "conclusion": "success"},
+      "platform-smoke (ubuntu-24.04, py3.12)": {"id": 92479547869, "status": "completed", "conclusion": "success"},
+      "platform-smoke (ubuntu-24.04, py3.10)": {"id": 92479547896, "status": "completed", "conclusion": "success"},
+      "platform-smoke (windows-latest, py3.12)": {"id": 92479547902, "status": "completed", "conclusion": "success"},
+      "platform-smoke (windows-latest, py3.10)": {"id": 92479547967, "status": "completed", "conclusion": "success"},
+      "ml-import-contracts": {"id": 92479548276, "status": "completed", "conclusion": "skipped"}
+    },
+    "artifact": {
+      "id": 8951002036,
+      "name": "release-check-31057970313",
+      "digest": "sha256:be521a1b5c3f27c4e183203cce8a29a03f21fd6410a257e99c10e9a4c5d41536",
+      "expired": false
+    },
+    "scope": "Core/full-suite and platform smoke only; optional ML imports and real game audio were not executed."
+  },
   "correction_commits": [
     {"sha": "b349ba8e3b3d1f8fa9a0246d649017294cb69298", "title": "Bind the complete calibration profile to strict promotion receipts"},
     {"sha": "a6f82a5bbaadf35ea2eb5d794d6b55c189254de4", "title": "Fix LID train serving parity and forbid raw CTC authority"},
@@ -22,25 +48,40 @@
     {"id": "P0.2", "status": "VERIFIED", "evidence": ["qa_v2.py calibrated LID vector", "lid-fusion-v3", "tests/test_lid.py", "a6f82a5"]},
     {"id": "P0.3", "status": "VERIFIED", "evidence": ["GoldsetStore.claim allow_hidden=False", "serve_goldset_review.py token-separated endpoints", "ae13505"]},
     {"id": "P0.4", "status": "VERIFIED", "evidence": ["hidden seal verification and atomic one-shot receipt", "promote_calibration_profile.py receipt input", "ae13505"]},
-    {"id": "P0.5", "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED", "evidence": ["benchmark.py artifact re-open/hash/decode checks", "promote_branch.py executes allowlisted adapter", "tests/test_cross_module_integration.py", "d33f182"], "limit": "No P3R/DQ3 real benchmark or CI attestation was available in this workspace."},
+    {"id": "P0.5", "status": "IMPLEMENTED_BUT_REAL_AUDIO_BLOCKED", "evidence": ["benchmark.py artifact re-open/hash/decode checks", "promote_branch.py executes allowlisted adapter", "tests/test_cross_module_integration.py", "d33f182", "CI #71 on 627b84b"], "limit": "Real P3R/DQ3 benchmark remains blocked; CI verifies core contracts only."},
     {"id": "P1.1", "status": "VERIFIED", "evidence": ["RepairedCandidate and full stage reinsertion", "tests/test_v2.py::test_repaired_candidate_reenters_full_pipeline_and_can_be_selected", "e6dd696"]},
     {"id": "P1.2", "status": "VERIFIED", "evidence": ["measured performance evidence and categorical one-hot schema", "run_scene_v2 duration gate test", "a3d4066"]},
     {"id": "P1.3", "status": "VERIFIED", "evidence": ["scene.dialogue_channel and mounted-source delta", "tests/test_scene_qa_windows.py", "a8ac451"]},
     {"id": "P1.4", "status": "VERIFIED", "evidence": ["bounded visited-state FMV search", "A1+B1/A1+B2/A2+B1 regression", "ab54ac6"]},
     {"id": "P1.5", "status": "VERIFIED", "evidence": ["strict structured-linguistic-evidence policy", "legacy transcript becomes HUMAN_REVIEW/ASR_UNCERTAIN", "3e7d5f4"]},
-    {"id": "P1.6", "status": "VERIFIED", "evidence": ["root pytest discovery includes explicit historical skips", "167 passed, 3 skipped, 11 subtests", "3e7d5f4"]},
+    {"id": "P1.6", "status": "VERIFIED", "evidence": ["root pytest discovery includes explicit historical skips", "184 passed, 3 skipped, 11 subtests", "3e7d5f4", "CI #71 full-suite"]},
     {"id": "P2.1", "status": "REMAINING_LIMIT", "evidence": ["sequence alignment remains deterministic and covered"], "limit": "No separate tie-break policy redesign was requested by the corrective commits."},
     {"id": "P2.2", "status": "REMAINING_LIMIT", "evidence": ["German/apostrophe normalization and feature contracts are covered"], "limit": "An apostrophe is still an orthographic unit; no game-specific acoustic phoneme map exists."},
     {"id": "P2.3", "status": "VERIFIED", "evidence": ["NFC German normalization and cross-module integration regression", "f1407ee ancestry and ad1eddb"]}
   ],
+  "closure_5824fd5": {
+    "specification": "PROMPT_CODEX_CIERRE_5824FD5.md",
+    "audit": "AUDITORIA_5824FD5_INTEGRIDAD_FINAL.md",
+    "functional_commits": [
+      {"sha": "bf72d3d1015a73acde9d60b000e7872083719b85", "subject": "Recompute authoritative hidden labels and bridge evidence", "tests": "28 focused tests"},
+      {"sha": "a5524cd5dd85c5bf067177034b77a4e3483de018", "subject": "Compare declared build commit with independently observed checkout", "tests": "73 focused tests"},
+      {"sha": "0a7420c3dc444e027c42cb3fc36412f267bceade", "subject": "Pin benchmark attestation trust anchors", "tests": "18 focused tests"},
+      {"sha": "bb1e49bf95ee61e764bc05e9bde1b54f26372473", "subject": "Bind second game extraction to signed provenance", "tests": "14 focused tests"},
+      {"sha": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986", "subject": "Install attestation dependencies in CI", "tests": "CI run 31057970313 on exact HEAD"}
+    ],
+    "ci_head": "627b84bb2526b2af028a39b8fa7b1dfddcfa4986",
+    "ci_run": 31057970313,
+    "ci_conclusion": "success",
+    "real_validation": "BLOCKED"
+  },
   "tests": {
-    "pytest_root_discovery": {"command": "cd src; .venv\\Scripts\\python.exe -m pytest -q", "result": "167 passed, 3 skipped, 11 subtests passed", "exit_code": 0},
-    "unittest_discovery": {"command": "cd src; .venv\\Scripts\\python.exe -m unittest discover -s tests -p test*.py", "result": "145 tests OK", "exit_code": 0},
+    "pytest_root_discovery": {"command": "PYTHONPATH=src src/.venv/Scripts/python.exe -m pytest -q", "result": "184 passed, 3 skipped, 3 warnings, 11 subtests passed in 6.88s", "exit_code": 0},
+    "unittest_discovery": {"command": "PYTHONPATH=src src/.venv\\Scripts\\python.exe -m unittest discover -s src/tests -p 'test_*.py' -q", "result": "162 tests OK in 5.086s", "exit_code": 0},
     "compileall": {"command": "cd src; .venv\\Scripts\\python.exe -m compileall -q .", "result": "no output", "exit_code": 0},
-    "release_check": {"path": "artifacts/final_verification/release_check.json", "status": "PASS", "exit_code": 0, "scope": ["compileall", "pytest -q", "tests/run_smoke.py", "tests/run_v2.py", "scripts/check_port.py", "scripts/validate_instructions.py"]},
+    "release_check": {"path": "src/artifacts/final_verification/release_check.json", "status": "PASS", "exit_code": 0, "scope": ["compileall", "tests/run_smoke.py", "tests/run_v2.py", "scripts/check_port.py", "scripts/validate_instructions.py"], "ci_artifact": "release-check-31057970313"},
     "pip_check": {"command": "cd src; .venv\\Scripts\\python.exe -m pip check", "result": "No broken requirements found", "exit_code": 0},
     "git_diff_check": {"command": "git diff --check", "exit_code": 0},
-    "commit_level": {"commit_5": "84 affected tests", "commit_6": "66 affected tests", "commit_7": "71 affected tests", "commit_8": "78 affected tests", "commit_9": "164 passed, 3 skipped, 11 subtests", "commit_10": "3 integration tests"}
+    "commit_level": {"commit_1_bf72d3d": "28 focused tests", "commit_2_a5524cd": "73 focused tests", "commit_3_0a7420c": "18 focused tests", "commit_4_bb1e49b": "14 focused tests", "commit_5_627b84b": "CI #71; 184 pytest, 162 unittest locally"}
   },
   "real_validation": {
     "p3r": "BLOCKED: no verified Persona 3 Reload audio/assets were available in this workspace",
@@ -49,14 +90,15 @@
     "whisperx_speechbrain_mfa_ci": "NOT_RUN",
     "gold_set_human": "PENDING",
     "calibration_authority": false,
-    "ci_independent_for_validated_code_commit": "NOT_OBSERVED"
+    "ci_independent_for_validated_code_commit": "VERIFIED: run 31057970313 / #71 on 627b84bb2526b2af028a39b8fa7b1dfddcfa4986"
   },
   "limitations": [
     "No real P3R or DQ3 audio benchmark was executed; synthetic integration tests are explicitly not game validation.",
     "No human two-reviewer gold set was supplied; calibration authority remains false.",
     "Optional ML backends and OmniVoice GPU were not run in this environment.",
     "P2.1 and P2.2 remain documented non-blocking limits.",
-    "The release check's PASS is CPU/core/repository evidence only, not acoustic quality evidence."
+    "The release check's PASS and CI #71 are CPU/core/repository evidence only, not acoustic quality evidence.",
+    "The ML import workflow remains skipped on push and requires an explicit workflow_dispatch run."
   ],
   "generated_files": ["artifacts/final_verification/report.json", "artifacts/final_verification/report.md", "artifacts/final_verification/release_check.json"]
 }
